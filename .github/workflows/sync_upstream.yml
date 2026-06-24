@@ -1,0 +1,76 @@
+name: Sync Upstream (Telegram-Stremio)
+
+# ╔══════════════════════════════════════════════════════════════════════════╗
+# ║ Syncs your fork with upstream by cherry-picking new commits.           ║
+# ║ Sends Telegram notifications with interactive push confirmation.       ║
+# ║                                                                        ║
+# ║ Required Secrets:                                                      ║
+# ║   TELEGRAM_BOT_TOKEN  - Bot token from @BotFather                     ║
+# ║   TELEGRAM_CHAT_ID    - Your Telegram chat ID                         ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
+
+# ── Triggers ────────────────────────────────────────────────────────────────
+on:
+  # Automatic: runs every 12 hours
+  schedule:
+    - cron: '0 */12 * * *'
+
+  # Manual: trigger from Actions tab with options
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run — preview commits without applying'
+        required: false
+        default: false
+        type: boolean
+      test_telegram:
+        description: 'Test Telegram bot connection only'
+        required: false
+        default: false
+        type: boolean
+
+# ── Permissions ─────────────────────────────────────────────────────────────
+permissions:
+  contents: write  # Needed for git push
+
+# ── Concurrency ─────────────────────────────────────────────────────────────
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+# ── Jobs ────────────────────────────────────────────────────────────────────
+jobs:
+  sync:
+    name: ${{ inputs.test_telegram == true && '🧪 Test Telegram' || inputs.dry_run == true && '👀 Dry Run' || '🔄 Sync Upstream' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      TZ: 'Asia/Kolkata'
+
+    steps:
+      # ── Checkout ──────────────────────────────────────────────────────
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v6
+        with:
+          ref: master
+          fetch-depth: 0  # Full history for commit matching
+
+      # ── Configure Git ────────────────────────────────────────────────
+      - name: 🔧 Configure Git
+        run: |
+          git config user.name "${{ github.actor }}"
+          git config user.email "${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com"
+
+      # ── Run Sync Script ──────────────────────────────────────────────
+      - name: 🚀 Run Sync
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_TIMEOUT: '300'
+          DRY_RUN: ${{ inputs.dry_run && 'true' || 'false' }}
+          TEST_MODE: ${{ inputs.test_telegram && 'true' || 'false' }}
+          UPSTREAM_URL: 'https://github.com/weebzone/Telegram-Stremio.git'
+          UPSTREAM_BRANCH: 'master'
+          LOCAL_BRANCH: 'master'
+        run: |
+          bash .github/scripts/sync_upstream.sh
