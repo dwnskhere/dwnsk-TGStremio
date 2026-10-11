@@ -80,7 +80,7 @@ function resultCard(r, idx) {
     ${posterHtml(r)}
     <div class="rp-body">
       <div class="rp-title">${esc(r.title)}${yr}</div>
-      <button class="rp-btn" onclick="sendRequest(${idx})"><i class="fa-solid fa-paper-plane"></i> Request</button>
+      <button class="rp-btn" id="rp-btn-${idx}" onclick="sendRequest(${idx}, this)"><i class="fa-solid fa-paper-plane"></i> Request</button>
     </div>
   </div>`;
 }
@@ -94,8 +94,11 @@ function popularCard(r) {
   </div>`;
 }
 
+const submittingIdxs = new Set();
+
 async function doSearch(e) {
   if (e) e.preventDefault();
+  submittingIdxs.clear();
   const q = document.getElementById('rp-q').value.trim();
   if (q.length < 2) { showToast('Type at least 2 characters.', 'info'); return; }
   const wrap = document.getElementById('rp-results-wrap');
@@ -114,9 +117,18 @@ async function doSearch(e) {
   }
 }
 
-async function sendRequest(idx) {
+async function sendRequest(idx, btn) {
+  if (submittingIdxs.has(idx)) return;
   const r = searchResults[idx];
   if (!r) return;
+
+  const buttonEl = btn || document.getElementById(`rp-btn-${idx}`);
+  if (buttonEl) {
+    buttonEl.disabled = true;
+    buttonEl.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Requesting…';
+  }
+  submittingIdxs.add(idx);
+
   try {
     const res = await fetch('/api/request/submit', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -129,6 +141,7 @@ async function sendRequest(idx) {
     const map = {
       created:            ['🎉 Request submitted! We\'ll try to add it soon.', 'success', 'Requested'],
       added:              ['👍 Added your vote — this was already requested.', 'success', 'Requested'],
+      already_voted:      ['👍 You already requested this title!', 'info', 'Requested'],
       reopened:           ['🔄 Request re-opened. Thanks!', 'success', 'Requested'],
       already_available:  ['✅ Good news — this is already in the library!', 'info', 'Available'],
       banned:             ['🚫 This title has been banned and can\'t be requested.', 'error', 'Not allowed'],
@@ -137,9 +150,30 @@ async function sendRequest(idx) {
     const m = map[data.reason] || (data.ok ? ['Request submitted!', 'success', 'Requested']
                                             : ['Something went wrong.', 'error', 'Error']);
     showToast(m[0], m[1], m[2]);
-    if (data.ok) loadPopular();
+    if (data.ok) {
+      if (buttonEl) {
+        buttonEl.disabled = true;
+        buttonEl.style.opacity = '0.6';
+        buttonEl.style.cursor = 'default';
+        buttonEl.innerHTML = data.reason === 'already_available'
+          ? '<i class="fa-solid fa-check"></i> Available'
+          : '<i class="fa-solid fa-check"></i> Requested';
+      }
+      loadPopular();
+    } else {
+      if (buttonEl) {
+        buttonEl.disabled = false;
+        buttonEl.innerHTML = '<i class="fa-solid fa-paper-plane"></i> Request';
+      }
+      submittingIdxs.delete(idx);
+    }
   } catch (err) {
     showToast('Request failed. Please try again.', 'error', 'Error');
+    if (buttonEl) {
+      buttonEl.disabled = false;
+      buttonEl.innerHTML = '<i class="fa-solid fa-paper-plane"></i> Request';
+    }
+    submittingIdxs.delete(idx);
   }
 }
 
@@ -151,13 +185,27 @@ async function loadPopular() {
     const data = await res.json();
     const items = data.data || [];
     if (!items.length) { wrap.style.display = 'none'; return; }
-    wrap.style.display = '';
     box.innerHTML = items.map(popularCard).join('');
   } catch (err) {
     wrap.style.display = 'none';
   }
 }
 
-document.addEventListener('DOMContentLoaded', loadPopular);
+async function checkUrlQuery() {
+  const params = new URLSearchParams(window.location.search);
+  const q = params.get('q');
+  if (q) {
+    const input = document.getElementById('rp-q');
+    if (input) {
+      input.value = q;
+      doSearch();
+    }
+  }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  loadPopular();
+  checkUrlQuery();
+});
 </script>
 {% endblock %}

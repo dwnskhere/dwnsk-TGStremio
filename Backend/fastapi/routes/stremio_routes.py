@@ -44,6 +44,22 @@ def _donation():
     text = "Enjoying Telegram Stremio?\nTap to support the developer"
     return {"name": "❤️ Support", "title": text, "description": text, "externalUrl": "https://donate.weebzonex.workers.dev"}
 
+def _request_stream(query: Optional[str] = None):
+    base = SettingsManager.current().base_url or ""
+    if base:
+        request_url = f"{base.rstrip('/')}/request"
+        if query:
+            request_url += f"?q={quote(query)}"
+    else:
+        request_url = get_streambot_url()
+
+    return {
+        "name": "📥 Request Media",
+        "title": "Not available yet in library.\nClick to open Public Request Page & request this title!",
+        "description": "Tap to request this title",
+        "externalUrl": request_url
+    }
+
 async def _external_meta_for_id(id: str, parsed: dict, media_type: str) -> Optional[dict]:
     """Resolve basic metadata from TMDB or Cinemeta when an item is not in the database.
     This prevents Stremio/Nuvio from crashing with 'Could not load details' on un-cached items."""
@@ -152,6 +168,29 @@ async def _external_meta_for_id(id: str, parsed: dict, media_type: str) -> Optio
     except Exception as exc:
         LOGGER.warning(f"[EXTERNAL META] Failed to resolve fallback meta for {id}: {exc}")
     return None
+
+async def _request_title_for_id(id: str, parsed: dict, media_type: str, media_details: Optional[dict] = None) -> str:
+    """Return a clean title for the public request page."""
+    if media_details:
+        title = media_details.get("title") or media_details.get("name") or media_details.get("original_title")
+        if title:
+            title = str(title)
+            season = parsed.get("season_num")
+            episode = parsed.get("episode_num")
+            if media_type == "series" and season is not None and episode is not None:
+                return f"{title} S{int(season):02d}E{int(episode):02d}"
+            return title
+
+    ext = await _external_meta_for_id(id, parsed, media_type)
+    if ext and ext.get("name"):
+        title = str(ext["name"])
+        season = parsed.get("season_num")
+        episode = parsed.get("episode_num")
+        if media_type == "series" and season is not None and episode is not None:
+            return f"{title} S{int(season):02d}E{int(episode):02d}"
+        return title
+
+    return parsed.get("imdb_id") or id
 
 def build_proxy_url(original_url: str) -> str | None:
     settings = SettingsManager.current()
@@ -2225,7 +2264,8 @@ async def get_streams(
             streams = filtered
 
     if not streams:
-        return {"streams": [_donation()]}
+        req_query = await _request_title_for_id(id, parsed, media_type, media_details)
+        return {"streams": [_request_stream(req_query), _donation()]}
 
     ascending = config.get("quality_sort") == "asc"
     if is_combined:
