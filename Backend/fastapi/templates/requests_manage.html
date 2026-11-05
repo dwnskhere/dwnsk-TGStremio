@@ -123,6 +123,16 @@ function idLine(r) {
   return '';
 }
 
+function userLine(r) {
+  if (!r.users || !r.users.length) return '';
+  const names = r.users.map(u => {
+    const handle = u.username ? ` (@${esc(u.username)})` : '';
+    const name = esc(u.name || (u.user_id ? String(u.user_id) : 'Subscriber'));
+    return `${name}${handle}`;
+  });
+  return `<div class="rq-user" style="font-size:0.75rem; color:#a1a1aa; margin-top:4px;"><i class="fa-solid fa-user" style="font-size:0.7rem; margin-right:4px;"></i>${names.join(', ')}</div>`;
+}
+
 function cardHtml(r) {
   const poster = r.poster
     ? `<img src="${esc(r.poster)}" loading="lazy" alt="">`
@@ -148,6 +158,7 @@ function cardHtml(r) {
     <div class="rq-body">
       <div class="rq-title">${esc(r.title)}${yr}</div>
       <div class="rq-id">${idLine(r)}</div>
+      ${userLine(r)}
     </div>
     <div class="rq-actions">${actions}</div>
   </div>`;

@@ -60,7 +60,16 @@ def _approver_ids() -> list:
     return deduped
 
 
-async def _notify_admin_request(title: str, year: Optional[int], media_type: str, count: int, imdb_id=None, tmdb_id=None, is_new: bool = True):
+async def _notify_admin_request(
+    title: str,
+    year: Optional[int],
+    media_type: str,
+    count: int,
+    imdb_id=None,
+    tmdb_id=None,
+    is_new: bool = True,
+    requester_info: Optional[dict] = None
+):
     """Send Telegram notification to bot owner / approvers when a request is made."""
     recipients = _approver_ids()
     if not recipients:
@@ -77,6 +86,13 @@ async def _notify_admin_request(title: str, year: Optional[int], media_type: str
         ids_parts.append(f"TMDB: <code>{tmdb_id}</code>")
     ids_str = f"\n🆔 <b>IDs:</b> {' | '.join(ids_parts)}" if ids_parts else ""
 
+    user_str = ""
+    if requester_info:
+        u_name = requester_info.get("name") or "User"
+        u_id = requester_info.get("user_id") or ""
+        u_handle = f" (@{requester_info.get('username')})" if requester_info.get("username") else ""
+        user_str = f"\n👤 <b>Requested by:</b> {u_name}{u_handle} [<code>{u_id}</code>]" if u_id else f"\n👤 <b>Requested by:</b> {u_name}"
+
     base_url = (SettingsManager.current().base_url or "").rstrip("/")
     manage_link = f"\n\n🔗 <a href='{base_url}/admin/requests'>Open Admin Dashboard</a>" if base_url else ""
 
@@ -85,6 +101,7 @@ async def _notify_admin_request(title: str, year: Optional[int], media_type: str
         f"🎬 <b>Title:</b> {title}{yr_str}\n"
         f"🏷 <b>Type:</b> {type_label}\n"
         f"👥 <b>Total Requesters:</b> {count}"
+        f"{user_str}"
         f"{ids_str}"
         f"{manage_link}"
     )
@@ -287,7 +304,7 @@ _submit_lock = asyncio.Lock()
 
 
 #----- Public submit: de-duplicated per title, honouring banned/denied/uploaded state
-async def submit_request(*, media_type, tmdb_id, imdb_id, title, year, poster, client_ip) -> dict:
+async def submit_request(*, media_type, tmdb_id, imdb_id, title, year, poster, client_ip, token: Optional[str] = None) -> dict:
     media_type = _norm_type(media_type)
     try:
         tmdb_id = int(tmdb_id) if tmdb_id else None
@@ -296,6 +313,29 @@ async def submit_request(*, media_type, tmdb_id, imdb_id, title, year, poster, c
     imdb_id = imdb_id or None
     if not tmdb_id and not imdb_id:
         return {"ok": False, "reason": "invalid"}
+
+    # Resolve subscriber details from token if provided
+    requester_info = None
+    if token:
+        try:
+            token_doc = await db.get_api_token(token)
+            if token_doc:
+                uid = token_doc.get("user_id")
+                uname = token_doc.get("name")
+                u_handle = None
+                if uid:
+                    user_doc = await db.get_user(int(uid))
+                    if user_doc:
+                        uname = user_doc.get("name") or uname
+                        u_handle = user_doc.get("username")
+                requester_info = {
+                    "token": token,
+                    "user_id": uid,
+                    "name": uname,
+                    "username": u_handle,
+                }
+        except Exception as e:
+            LOGGER.warning(f"[REQUEST] Failed to resolve token info: {e}")
 
     async with _submit_lock:
         #----- Match an existing request by either id (imdb id preferred)
@@ -317,6 +357,10 @@ async def submit_request(*, media_type, tmdb_id, imdb_id, title, year, poster, c
             status = existing.get("status")
 
             update = {"$addToSet": {"requesters": iphash}, "$set": {"last_requested_at": now, "updated_at": now}}
+            if requester_info:
+                # Add requester to users list avoiding duplicates by user_id or name
+                update.setdefault("$addToSet", {})
+                update["$addToSet"]["users"] = requester_info
             if imdb_id and not existing.get("imdb_id"):
                 update["$set"]["imdb_id"] = imdb_id
             if tmdb_id and not existing.get("tmdb_id"):
@@ -345,7 +389,8 @@ async def submit_request(*, media_type, tmdb_id, imdb_id, title, year, poster, c
                     count=new_count,
                     imdb_id=existing.get("imdb_id") or imdb_id,
                     tmdb_id=existing.get("tmdb_id") or tmdb_id,
-                    is_new=False
+                    is_new=False,
+                    requester_info=requester_info
                 ))
             return {"ok": True, "reason": reason, "title": existing.get("title")}
 
@@ -362,6 +407,7 @@ async def submit_request(*, media_type, tmdb_id, imdb_id, title, year, poster, c
             "poster": poster or "",
             "status": "pending",
             "requesters": [iphash],
+            "users": [requester_info] if requester_info else [],
             "created_at": now,
             "updated_at": now,
             "last_requested_at": now,
@@ -374,7 +420,8 @@ async def submit_request(*, media_type, tmdb_id, imdb_id, title, year, poster, c
             count=1,
             imdb_id=imdb_id,
             tmdb_id=tmdb_id,
-            is_new=True
+            is_new=True,
+            requester_info=requester_info
         ))
         return {"ok": True, "reason": "created", "title": doc["title"]}
 

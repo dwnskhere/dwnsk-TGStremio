@@ -130,11 +130,14 @@ async function sendRequest(idx, btn) {
   submittingIdxs.add(idx);
 
   try {
+    const urlParams = new URLSearchParams(window.location.search);
+    const token = urlParams.get('token') || '';
     const res = await fetch('/api/request/submit', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         media_type: r.media_type, tmdb_id: r.tmdb_id, imdb_id: r.imdb_id || null,
         title: r.title, year: r.year, poster: r.poster,
+        token: token,
       }),
     });
     const data = await res.json();

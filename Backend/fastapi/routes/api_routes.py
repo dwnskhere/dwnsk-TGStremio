@@ -643,6 +643,7 @@ async def request_submit_api(payload: dict, client_ip: str) -> dict:
         year=payload.get("year"),
         poster=payload.get("poster"),
         client_ip=client_ip,
+        token=payload.get("token"),
     )
     return {"status": "success" if result.get("ok") else "error", **result}
 
