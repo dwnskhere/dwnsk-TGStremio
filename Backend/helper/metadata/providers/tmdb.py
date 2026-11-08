@@ -119,12 +119,31 @@ async def _tmdb_alternative_titles(media_type: str, tmdb_id) -> list:
                 target = client.movie(tmdb_id) if media_type == "movie" else client.tv(tmdb_id)
                 alt = await target.alternative_titles()
             entries = list(getattr(alt, "titles", None) or []) + list(getattr(alt, "results", None) or [])
-            titles = [t for t in (getattr(e, "title", "") for e in entries) if t]
+            titles = []
+            seen = set()
+            # Movie alternative titles expose `title`; TV alternative names may
+            # expose `name`. Support both shapes returned by TMDb wrappers.
+            for entry in entries:
+                value = str(
+                    getattr(entry, "title", None)
+                    or getattr(entry, "name", None)
+                    or (entry.get("title") or entry.get("name") if isinstance(entry, dict) else "")
+                    or ""
+                ).strip()
+                if value and value.casefold() not in seen:
+                    seen.add(value.casefold())
+                    titles.append(value)
         except Exception as e:
             LOGGER.warning(f"TMDb alternative-titles fetch failed for {media_type} id={tmdb_id}: {e}")
         return titles
 
     return await cached_call(ALT_TITLES_CACHE, cache_key, "alt_titles", _produce)
+
+
+async def alternative_titles(media_type: str, tmdb_id) -> list[str]:
+    """Return TMDb alternative movie titles / TV names for announcement AKA fields."""
+    normalized = "movie" if media_type == "movie" else "tv"
+    return await _tmdb_alternative_titles(normalized, tmdb_id)
 
 
 async def pick_best(results, query_title: str, query_year: Optional[int], media_type: str):

@@ -1,52 +1,57 @@
-# Telegram announcement redesign
+# Telegram announcement redesign — second pass
 
-This update redesigns the existing announcement sender used by the configured announcement channel. It does not add a second announcement system or change the existing channel setting.
+This redesign continues to modify the existing Telegram announcement pipeline and keeps the configured announcement channel, Stremio/Nuvio/Get Addon buttons, existing message tracking and media indexing behaviour.
 
-## Behaviour
+## Image selection
 
-- **Movies:** one post per TMDb movie. New quality versions edit that post in place.
-- **Episodes:** one post per season/episode. New qualities edit that episode's post in place.
-- **Completed seasons:** once TMDb metadata lists all regular episodes for a season as released, and every one of those episodes has at least one live indexed Telegram stream, the bot publishes one season post. It only deletes the episode posts after the season post has been successfully sent or edited.
-- **Later season quality additions:** edit the season post rather than recreating an episode post.
-- **Quality text:** a simple ascending list, e.g. `480p | 720p | 1080p`. Dead links (`is_dead=True`) are not shown or counted toward season completion.
-- **Specials:** Season 0 and episodes marked `episode_type=special` are excluded from season completion and the season quality summary. Unreleased episodes are excluded until their metadata air date has passed.
-- **Posters:** up to five distinct portrait posters are presented in a Telegram Rich Message slideshow. Landscape backdrops are not substituted for posters.
-- **Buttons:** the existing Stremio, Nuvio and Get Addon buttons and their existing URL patterns are retained.
+- **Movies:** one official TMDb portrait poster, followed by up to four landscape TMDb backdrops from `GET /movie/{movie_id}/images`. The canonical TMDb `poster_path` and `backdrop_path` are used as safe fallbacks when the images endpoint does not include them.
+- **TV series and consolidated seasons:** one official portrait series/season poster, followed by up to four landscape promotional backdrops from `GET /tv/{series_id}/images`. A season-specific poster is preferred when TMDb has one; otherwise the canonical series poster is used.
+- **Individual TV episodes:** up to five landscape episode stills from `GET /tv/{series_id}/season/{season_number}/episode/{episode_number}/images`. Generic series posters or backdrops are not substituted when no episode still is available.
+- The announcement gallery uses TMDb-owned image paths. Portrait posters are never placed in a landscape slot; every backdrop and episode still is checked against its TMDb aspect ratio / width / height fields.
+- The assets are embedded in one Telegram Rich Message slideshow rather than sent as separate album messages.
 
-The compact announcement contains the title/year, type, rating (when available), genres (when available), the quality list, and a shortened plot/overview. Titles and metadata are HTML-escaped before being sent.
+## Announcement layout
 
-## Telegram API compatibility
+The rich text now follows the supplied two-column table layout:
 
-The slideshow uses Telegram Rich Messages (`sendRichMessage`) and updates them with `editMessageText.rich_message`. Telegram added Rich Messages in Bot API 10.1 and the explicit rich-message media list in Bot API 10.2. The code uses the hosted Bot API endpoint and the existing `BOT_TOKEN`; no additional Python dependency or local Bot API server is required. If Rich Messages are unavailable, it falls back to the existing Pyrogram sender with a single poster (or a text post).
+1. A title line with media type and episode/season number where applicable.
+2. A compact two-column table with `Original Name` / `AKA`, `Type` / `Genres`, and `Runtime` / embedded `TMDB Link`; each cell places its label above its value, as in the supplied example.
+3. A collapsed `Overview (Tap to Expand)` section.
+4. A separate `📶 Quality: 480p | 720p | 1080p` line.
 
-The bot must be an administrator in the announcement channel with permission to post messages. It also needs permission to delete its prior episode posts when a season is consolidated. The current Stremio/Nuvio/Get Addon buttons continue to be generated from the existing settings and helper.
+TMDb supplies original names, alternative titles, runtime, episode stills, and links. For episodes, AKA is formatted as `Series Name S02E01 - Episode Name`. When an alias or runtime is not available, the announcement uses `N/A` or the best available episode-runtime estimate. Rating was omitted to match the latest sample template.
 
-## Season completion requirements
+## Announcement and quality behaviour
 
-Season consolidation needs a working TMDb API key from the existing `tmdb_api` setting (or `TMDB_API` config value), a season metadata response with a complete episode list, an air date for every regular episode, all regular episode air dates in the past, and at least one non-dead indexed stream for each expected episode. Missing or incomplete metadata deliberately prevents consolidation rather than guessing.
+- Movies retain one post per TMDb movie. New qualities edit that post in place.
+- Episodes retain one post per season/episode. New qualities edit that episode post in place.
+- A completed season is published once the metadata-defined checklist is complete and each expected regular episode has at least one non-dead indexed stream. Season 0, specials, and synthetic combined-pack entries are excluded.
+- The season post is confirmed before individual episode posts are deleted. Failed deletions are marked for retry by the hourly reconciler.
+- Later quality additions update the season post.
+- Quality values are unique, sorted low-to-high, and dead streams (`is_dead=True`) are excluded.
+- The hourly reconciler can recover earlier episode-tracking rows even if older rows do not have the newer `kind` metadata field.
 
-An hourly reconciler rechecks pending seasons. This handles the case where all episodes were already indexed before the final episode's official air date. The reconciler also retries deletion of episode announcements if Telegram temporarily refuses a delete.
+## Telegram compatibility
 
-## Database and migration
+The main path uses Telegram Rich Messages (`sendRichMessage`) and updates existing rich posts with `editMessageText.rich_message`. The compatibility fallback uses a conventional HTML message and a single poster because traditional Telegram captions do not support Rich Message tables, collapsible sections, or slideshows.
 
-No collection migration or new dependency is required. The existing `tracking.announced` collection is reused with these IDs:
+## Season completion diagnosis
 
-- `movie:<tmdb_id>`
-- `tv:<tmdb_id>:episode:<season>:<episode>`
-- `tv:<tmdb_id>:season:<season>`
+The season checker now emits a clear log when TMDb metadata is incomplete, an episode is missing an air date, a season document is absent, or particular released episode numbers have not yet been indexed with a live stream. Negative metadata results are cached for five minutes instead of an hour so a temporary incomplete TMDb response does not delay another attempt for as long.
 
-The records store the Telegram `chat_id` and `message_id` needed to edit or delete posts. The previous TV key (`tv:<tmdb_id>`) is retired when a replacement episode or season post has been successfully published. The current announcement channel, enable/disable setting, and indexing/streaming settings remain unchanged.
+For Marshals Season 1, current public listings show 13 episodes, ending with S01E13 `Wolves at the Door`. If only S01E01–S01E12 are indexed, consolidation correctly waits for E13. If all 13 episodes are present and healthy, the new pending log will identify whether the metadata endpoint or database is still preventing consolidation. The supplied ZIP does not include the live MongoDB contents, so the actual production records could not be independently inspected here.
 
-## Files changed
+## Files changed in this pass
 
-- `Backend/helper/announcer.py` — redesigned formatter, poster slideshow, message editing, quality aggregation, metadata-based season consolidation, delete/retry tracking.
-- `Backend/pyrofork/plugins/receiver.py` — route manual/personal-session additions through the same announcement updater.
-- `Backend/__main__.py` — start the idempotent hourly season reconciler after startup.
-- `Backend/fastapi/templates/settings.html` — clarify the existing announcement setting's behaviour.
+- `Backend/helper/announcer.py` — per-media TMDb image selection, poster/backdrop orientation enforcement, two-column rich template, collapsed overview, runtime/AKA enrichment, and season reconciliation diagnostics/recovery.
+- `Backend/helper/metadata/providers/tmdb.py` — alternative-title extraction now supports both movie `title` and TV `name` fields and exposes a public cached helper for announcements.
 
-## Validation performed
+No database schema migration or new dependency is required.
 
-- Python `compileall` across `Backend`.
-- Focused pure-function smoke tests for sample formatting, quality sorting and dead-link exclusion, multi-poster slideshow markup, metadata completion gating (specials/future/missing metadata), and season quality aggregation.
+## Validation
 
-A live integration test was not possible in this workspace because the project runtime dependencies, MongoDB, Telegram bot token, and TMDb API credentials were not available here. Run a test deployment with the above permissions before replacing a production instance.
+Python bytecode compilation was run across `Backend`. Focused local smoke tests were run for the rich template (movie and episode), quality ordering and dead-stream filtering, movie/TV poster-plus-backdrop selection, landscape-only episode stills, one-message slideshow structure, and metadata season completion (13 aired episodes, a future-dated episode, and a special). A live Telegram/MongoDB/TMDb integration test still requires the user's deployment credentials and actual production database.
+
+## Production database limitation
+
+The supplied ZIP contains the application source only; it does not include the live MongoDB collections or the tracking rows for the user's Marshals test. The code therefore cannot verify which S01E numbers or stream qualities are actually present in production. The new log lines report the expected episode numbers and the exact missing numbers when the hourly season reconciliation runs.
