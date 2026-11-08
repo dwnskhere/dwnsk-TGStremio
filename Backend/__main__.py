@@ -47,6 +47,8 @@ async def start_services():
 
         await StreamBot.start()
         StreamBot.username = StreamBot.me.username
+        from Backend.helper.announcer import start_announcement_reconciler
+        start_announcement_reconciler()
         LOGGER.info(f"Bot Client : [@{StreamBot.username}]")
         await asyncio.sleep(1.2)
 

@@ -206,6 +206,9 @@ async def _handle_personal_session(client: Client, message: Message) -> None:
                      if media_type == "tv" else "")
             LOGGER.info(f"[Manual Session] Added {quality} {where}to '{metadata_info.get('title')}' (id {tmdb_id}).")
             create_task(stamp_caption_with_id(message, metadata_info))
+            # Personal sessions can add new qualities to an existing title too.
+            # Route them through the same announcement updater as normal ingestion.
+            announce_new_media(metadata_info)
         else:
             LOGGER.warning(f"[Manual Session] Insert failed for message {message.id}.")
 
