@@ -934,7 +934,7 @@ async def build_nuvio_collection_data(token: str, collection_type: str = "full",
     # 01 ✦ DISCOVER COLLECTION (TMDB Global Trends + Local Addon Fallback)
     # =========================================================================
     K_IMG = "https://raw.githubusercontent.com/Kaoxt/The-Kollection/main/images"
-    NUVIO_CDN = "https://cdn.jsdelivr.net/gh/weebzone/Telegram-Stremio@master/assets/nuvio"
+    NUVIO_CDN = "https://cdn.jsdelivr.net/gh/PersonalProject03/Telegram-Stremio@master/assets/nuvio"
 
     # =========================================================================
     # 01 ✦ DISCOVER COLLECTION (TMDB Global Trends + Local Addon Fallback)
