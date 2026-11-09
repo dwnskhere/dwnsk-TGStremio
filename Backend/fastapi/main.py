@@ -7,6 +7,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from Backend import __version__
+from Backend.logger import LOGGER
 from Backend.fastapi.themes import DEFAULT_THEME, DEFAULT_STYLE, get_theme
 from Backend.fastapi.routes.api_routes import (
     add_custom_catalog_item_api,
@@ -120,6 +121,7 @@ from Backend.fastapi.routes.stream_routes import router as stream_router
 from Backend.fastapi.routes.cf_routes import router as cf_router
 from Backend.fastapi.routes.stremio_routes import router as stremio_router
 from Backend.fastapi.routes.webdav_routes import router as webdav_router
+from Backend.fastapi.routes.strm_routes import router as strm_router
 from Backend.fastapi.routes.template_routes import (
     admin_access_page,
     admin_dashboard_page,
@@ -168,6 +170,15 @@ async def _startup():
     asyncio.create_task(decay_client_failures())
     from Backend.helper.version_check import version_check_loop
     asyncio.create_task(version_check_loop())
+    from Backend.helper.strm_generator import strm_auto_sync_loop
+    asyncio.create_task(strm_auto_sync_loop(interval_hours=24))
+    # Warm the persistent franchise metadata cache in the background so Library
+    # Collections can be ready before the first Nuvio profile request.
+    try:
+        from Backend.helper.local_collections import ensure_library_collection_index
+        await ensure_library_collection_index()
+    except Exception as exc:
+        LOGGER.warning(f"[Library Collections] Startup index warm-up skipped: {exc}")
 
 
 #----- Streaming and Stremio routers
@@ -175,6 +186,7 @@ app.include_router(stream_router)
 app.include_router(cf_router)
 app.include_router(stremio_router)
 app.include_router(webdav_router)
+app.include_router(strm_router)
 
 
 #----- Public routes (no authentication)

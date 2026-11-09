@@ -90,6 +90,14 @@ async def process_file():
                 tmdb_id=metadata_info.get("tmdb_id"),
                 media_type=metadata_info.get("media_type"),
             )
+            try:
+                from Backend.helper.strm_generator import sync_single_media_strm
+                create_task(sync_single_media_strm(
+                    media_type=metadata_info.get("media_type"),
+                    tmdb_id=metadata_info.get("tmdb_id"),
+                ))
+            except Exception as _strm_err:
+                LOGGER.debug(f"[STRM] Instant sync hook error: {_strm_err}")
             announce_new_media(metadata_info)
             create_task(auto_fulfill(
                 tmdb_id=metadata_info.get("tmdb_id"),

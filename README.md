@@ -57,6 +57,7 @@
   * [🆓 Koyeb / Render / orkestr (free)](#-free-hosting-koyeb-render-orkestr)
   * [☁️ Cloudflare streaming (optional)](#️-cloudflare-streaming-optional)
 * [📺 Watch in Nuvio / Stremio](#-watch-in-nuvio--stremio)
+* [🍿 Emby & Jellyfin Integration (.strm)](#-emby--jellyfin-integration-strm)
 * [🏅 Contributors](#-contributors)
 
 ---
@@ -953,6 +954,59 @@ Your server is a standard **Stremio-style addon**, so it works in any compatible
 4. Done! 🎉 Your Telegram library appears in the catalog and streams directly.
 
 > 💡 Prefer **Stremio**? It works too — just install the same manifest URL.
+
+---
+
+# 🍿 Emby & Jellyfin Integration (.strm)
+
+Turn Telegram into unlimited cloud storage for your **Emby** or **Jellyfin** media server!
+
+Instead of mounting slow, unstable WebDAV drives or downloading heavy video files, Telestream can export **`.strm` (stream pointer)** files and companion **`.nfo` metadata** files directly onto your server.
+
+### 💡 How It Works
+* A `.strm` file is a lightweight text file containing the direct streaming URL to your Telestream backend:
+  ```text
+  Movies/
+  └── Inception (2010)/
+      ├── Inception (2010).strm   <- Contains http://your-vps:8000/dl/TOKEN/STREAM_ID/Inception.mkv
+      └── Inception (2010).nfo    <- Pre-scraped metadata & poster tags
+  TV Shows/
+  └── Breaking Bad (2008)/
+      ├── tvshow.nfo
+      └── Season 01/
+          ├── season.nfo
+          ├── Breaking Bad S01E01 - Pilot.strm
+          └── Breaking Bad S01E01 - Pilot.nfo
+  ```
+* When Emby scans the directory, it reads the `.strm` file and `.nfo` metadata instantly without using local disk storage for videos.
+* When you click **Play** in Emby, it streams chunk-by-chunk directly from Telegram via Telestream.
+
+### 🚀 Setup Instructions
+
+#### Option A: Running Emby and Telestream on the same VPS (Recommended)
+1. Open your Telestream **Web Panel** → **Settings** → **Emby & Jellyfin (.strm Support)**.
+2. Set the **Export Directory** (e.g., `/data/emby_library` or `C:\emby_media`).
+3. Click **Sync Library to Disk Now** (or make an API call to `POST /api/strm/sync`).
+4. In **Emby Server**:
+   * Add a **Movies** library pointing to `/data/emby_library/Movies`.
+   * Add a **TV Shows** library pointing to `/data/emby_library/TV Shows`.
+5. Emby will immediately populate your library with posters, backdrops, cast, and direct playback links.
+
+#### Option B: Remote Emby Server
+If Emby is running on a different machine or PC:
+* Download the full library archive from your Telestream Web UI or via `GET /api/strm/export.zip`.
+* Extract the folder into your Emby media directory.
+
+#### 👥 Native User Self-Service Signup Page (`/signup`)
+Telestream includes a built-in public registration portal for Emby users:
+1. In Telestream **Settings** → **Emby & Jellyfin (.strm Support)**:
+   * Enter your **Emby API Key** (generated in Emby ⚙️ → **API Keys**).
+   * Check **Enable Public User Signup Page (`/signup`)**.
+2. Give your users the registration link:
+   ```text
+   https://yourdomain.com/signup
+   ```
+3. Users pick their own username and password. Telestream automatically communicates with Emby's API to register them with safe, non-admin permissions!
 
 ---
 

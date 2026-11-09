@@ -6,9 +6,23 @@ services:
       - "8000:8000"
     volumes:
       - ./config.env:/app/config.env
+      - /media/telestream_emby:/media/telestream_emby
     restart: unless-stopped
     logging:
       driver: "json-file"
       options:
         max-size: "1m"     
-        max-file: "3"      
+        max-file: "3"
+
+  # Emby media server co-located alongside Telestream (accessible at http://<VPS_IP>:8096)
+  emby:
+    image: emby/embyserver:latest
+    container_name: embyserver
+    network_mode: host
+    environment:
+      - UID=0
+      - GID=0
+    volumes:
+      - /var/lib/emby:/config
+      - /media/telestream_emby:/media/telestream_emby:ro
+    restart: unless-stopped

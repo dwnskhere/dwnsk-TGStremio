@@ -874,6 +874,38 @@ async function sessRemove() {
 }
 
 document.addEventListener('DOMContentLoaded', sessLoadStatus);
+
+async function syncStrmLibrary(btn) {
+    const msg = document.getElementById('strm-sync-msg');
+    const orig = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Syncing...';
+    if (msg) { msg.textContent = 'Generating .strm and .nfo files...'; msg.style.color = 'var(--text-sec)'; }
+    try {
+        const res = await fetch('/api/strm/sync', { method: 'POST' });
+        const data = await res.json();
+        if (res.ok) {
+            if (msg) {
+                msg.textContent = `Synced ${data.strm_count} stream files & ${data.nfo_count} metadata files!`;
+                msg.style.color = '#22c55e';
+            }
+        } else {
+            if (msg) {
+                msg.textContent = data.detail || 'Sync failed.';
+                msg.style.color = '#ef4444';
+            }
+        }
+    } catch (e) {
+        if (msg) {
+            msg.textContent = 'Network error during sync.';
+            msg.style.color = '#ef4444';
+        }
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = orig;
+    }
+}
+
 </script>
 
 
@@ -1136,6 +1168,93 @@ document.addEventListener('DOMContentLoaded', sessLoadStatus);
     </div>
     
     <!-- ── WebDAV ──────────────────────────────────────────────────────── -->
+    
+    <!-- ── Emby / STRM Support ── -->
+    <div class="settings-card">
+        <h2><i class="fa-solid fa-play-circle"></i> Emby & Jellyfin (.strm Support)</h2>
+        <p style="font-size:0.82rem;color:var(--text-sec);margin-bottom:1rem">
+            Generate <code>.strm</code> and <code>.nfo</code> files for direct Emby, Jellyfin, or Kodi playback without storing any media locally.
+        </p>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4" style="margin-bottom:1rem">
+            <div>
+                <label class="s-label" for="strm_export_dir">Export Directory (VPS Local Disk)</label>
+                <input type="text" id="strm_export_dir" class="s-input"
+                    value="{{ settings.strm_export_dir | default('', true) }}"
+                    placeholder="e.g. /data/emby_library or C:\\emby_media"
+                    autocomplete="off" spellcheck="false">
+                <p style="font-size:0.75rem;color:var(--text-sec);margin-top:0.35rem">
+                    Target folder on your server where Emby library points.
+                </p>
+            </div>
+            <div>
+                <label class="s-label" for="strm_default_token">Default Streaming Token (Optional)</label>
+                <input type="text" id="strm_default_token" class="s-input"
+                    value="{{ settings.strm_default_token | default('', true) }}"
+                    placeholder="Leave empty to auto-use first active token"
+                    autocomplete="off" spellcheck="false">
+                <p style="font-size:0.75rem;color:var(--text-sec);margin-top:0.35rem">
+                    Specific API token embedded into generated stream links.
+                </p>
+            </div>
+        </div>
+
+
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4" style="margin-bottom:1rem">
+            <div>
+                <label class="s-label" for="emby_public_url">Emby Public Domain</label>
+                <input type="text" id="emby_public_url" class="s-input"
+                    value="{{ settings.emby_public_url | default('', true) }}"
+                    placeholder="e.g. https://embystremio3.duckdns.org"
+                    autocomplete="off" spellcheck="false">
+                <p style="font-size:0.75rem;color:var(--text-sec);margin-top:0.35rem">
+                    Where users watch. Used on the signup success screen.
+                </p>
+            </div>
+            <div>
+                <label class="s-label" for="emby_url">Emby Server Internal URL</label>
+                <input type="text" id="emby_url" class="s-input"
+                    value="{{ settings.emby_url | default('http://localhost:8096', true) }}"
+                    placeholder="http://localhost:8096"
+                    autocomplete="off" spellcheck="false">
+                <p style="font-size:0.75rem;color:var(--text-sec);margin-top:0.35rem">
+                    Local URL where Telestream talks to Emby API.
+                </p>
+            </div>
+            <div>
+                <label class="s-label" for="emby_api_key">Emby API Key</label>
+                <input type="password" id="emby_api_key" class="s-input"
+                    value="{{ settings.emby_api_key | default('', true) }}"
+                    placeholder="Emby ⚙️ -> API Keys"
+                    autocomplete="off" spellcheck="false">
+                <p style="font-size:0.75rem;color:var(--text-sec);margin-top:0.35rem">
+                    Used to create non-admin accounts at <code>/signup</code>.
+                </p>
+            </div>
+        </div>
+
+        <div style="margin-bottom:1.25rem">
+            <label style="display:inline-flex;align-items:center;gap:0.6rem;cursor:pointer">
+                <input type="checkbox" id="emby_public_signup" style="width:1.1rem;height:1.1rem;accent-color:var(--primary)"
+                    {% if settings.emby_public_signup %}checked{% endif %}>
+                <span style="font-size:0.88rem;font-weight:700">Enable Public User Signup Page (<code>/signup</code>)</span>
+            </label>
+            <p style="font-size:0.75rem;color:var(--text-sec);margin-top:0.25rem;margin-left:1.7rem">
+                Allows normal users to visit <code>https://yourdomain.com/signup</code> to register their own restricted Emby accounts.
+            </p>
+        </div>
+
+        <div style="display:flex;gap:0.75rem;align-items:center;flex-wrap:wrap;margin-top:0.75rem">
+            <button type="button" class="sess-btn primary" onclick="syncStrmLibrary(this)">
+                <i class="fa-solid fa-rotate"></i> Sync Library to Disk Now
+            </button>
+            <a href="/api/strm/export.zip" class="sess-btn" download style="text-decoration:none">
+                <i class="fa-solid fa-file-zipper"></i> Download STRM Library (.zip)
+            </a>
+            <span id="strm-sync-msg" style="font-size:0.82rem;font-weight:600"></span>
+        </div>
+    </div>
+
     <div class="settings-card">
         <h2><i class="fa-solid fa-hard-drive"></i> WebDAV</h2>
         <p style="font-size:0.82rem;color:var(--text-sec);margin-bottom:1rem">
@@ -1704,6 +1823,12 @@ async function saveSettings() {
         cf_stream_mode:                document.getElementById('cf_stream_mode').value,
         webdav_user:                   document.getElementById('webdav_user').value.trim(),
         webdav_password:               document.getElementById('webdav_password').value,
+        strm_export_dir:               document.getElementById('strm_export_dir') ? document.getElementById('strm_export_dir').value.trim() : '',
+        strm_default_token:            document.getElementById('strm_default_token') ? document.getElementById('strm_default_token').value.trim() : '',
+        emby_public_url:               document.getElementById('emby_public_url') ? document.getElementById('emby_public_url').value.trim() : '',
+        emby_url:                      document.getElementById('emby_url') ? document.getElementById('emby_url').value.trim() : '',
+        emby_api_key:                  document.getElementById('emby_api_key') ? document.getElementById('emby_api_key').value.trim() : '',
+        emby_public_signup:            document.getElementById('emby_public_signup') ? document.getElementById('emby_public_signup').checked : false,
         multi_tokens:                  collectList('multi_tokens'),
         extra_databases:               collectList('extra_databases'),
         global_search:                 document.getElementById('global_search').checked,
@@ -1863,6 +1988,12 @@ function renderSettings(s) {
     if (wu) wu.value = s.webdav_user || '';
     const wp = document.getElementById('webdav_password');
     if (wp) wp.value = s.webdav_password || '';
+    const sed = document.getElementById('strm_export_dir'); if (sed) sed.value = s.strm_export_dir || '';
+    const sdt = document.getElementById('strm_default_token'); if (sdt) sdt.value = s.strm_default_token || '';
+    const epu = document.getElementById('emby_public_url'); if (epu) epu.value = s.emby_public_url || '';
+    const eu = document.getElementById('emby_url'); if (eu) eu.value = s.emby_url || 'http://localhost:8096';
+    const ek = document.getElementById('emby_api_key'); if (ek) ek.value = s.emby_api_key || '';
+    const es = document.getElementById('emby_public_signup'); if (es) es.checked = !!s.emby_public_signup;
     toggleMediaflowFields();
 
     const titles = s.channel_titles || {};
@@ -2073,6 +2204,38 @@ window.addEventListener('DOMContentLoaded', () => {
     loadDbStats();
     loadLogs();
 });
+
+async function syncStrmLibrary(btn) {
+    const msg = document.getElementById('strm-sync-msg');
+    const orig = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Syncing...';
+    if (msg) { msg.textContent = 'Generating .strm and .nfo files...'; msg.style.color = 'var(--text-sec)'; }
+    try {
+        const res = await fetch('/api/strm/sync', { method: 'POST' });
+        const data = await res.json();
+        if (res.ok) {
+            if (msg) {
+                msg.textContent = `Synced ${data.strm_count} stream files & ${data.nfo_count} metadata files!`;
+                msg.style.color = '#22c55e';
+            }
+        } else {
+            if (msg) {
+                msg.textContent = data.detail || 'Sync failed.';
+                msg.style.color = '#ef4444';
+            }
+        }
+    } catch (e) {
+        if (msg) {
+            msg.textContent = 'Network error during sync.';
+            msg.style.color = '#ef4444';
+        }
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = orig;
+    }
+}
+
 </script>
 
 {% endblock %}

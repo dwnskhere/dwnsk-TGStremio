@@ -46,3 +46,6 @@ class Telegram:
     #----- WebDAV (optional env fallback; prefer Settings page)
     WEBDAV_USER     = getenv("WEBDAV_USER", "")
     WEBDAV_PASSWORD = getenv("WEBDAV_PASSWORD", "")
+
+    #----- Emby / Jellyfin STRM Export
+    STRM_EXPORT_DIR = getenv('STRM_EXPORT_DIR', '')
