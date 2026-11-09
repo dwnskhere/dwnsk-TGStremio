@@ -113,6 +113,57 @@ async def _notify_admin_request(
             LOGGER.warning(f"[REQUEST NOTIFY] Failed sending to {uid}: {exc}")
 
 
+async def _notify_users_fulfilled(doc: dict, status: str = "uploaded"):
+    """Send private Telegram DM via bot to all users who requested this content."""
+    users = doc.get("users") or []
+    if not users:
+        return
+
+    title = doc.get("title") or "Untitled"
+    year = doc.get("year")
+    yr_str = f" ({year})" if year else ""
+    media_type = doc.get("media_type")
+    type_label = "Series" if media_type == "tv" else "Movie"
+
+    if status == "uploaded":
+        text = (
+            f"🎬 <b>Your Requested Content is Now Available!</b>\n\n"
+            f"✨ <b>Title:</b> {title}{yr_str}\n"
+            f"🏷 <b>Type:</b> {type_label}\n\n"
+            f"The content you requested has just been added to the library and is ready to stream!"
+        )
+    elif status == "denied":
+        text = (
+            f"⚠️ <b>Request Update</b>\n\n"
+            f"Title: <b>{title}{yr_str}</b>\n\n"
+            f"We are sorry, but your request could not be fulfilled at this time."
+        )
+    else:
+        return
+
+    # Keep track of notified user IDs to avoid sending duplicates if a user voted multiple times
+    notified_uids = set()
+    for u in users:
+        uid = u.get("user_id")
+        if not uid:
+            continue
+        try:
+            uid_int = int(uid)
+        except (ValueError, TypeError):
+            continue
+
+        if uid_int in notified_uids:
+            continue
+        notified_uids.add(uid_int)
+
+        try:
+            await StreamBot.send_message(chat_id=uid_int, text=text, disable_web_page_preview=True)
+            LOGGER.info(f"[REQUEST NOTIFY] Sent status '{status}' DM to user {uid_int} for '{title}'")
+        except Exception as exc:
+            LOGGER.warning(f"[REQUEST NOTIFY] Failed sending PM to user {uid_int}: {exc}")
+
+
+
 def _movie_entry(m) -> dict:
     date = getattr(m, "release_date", None)
     return {
@@ -453,11 +504,22 @@ async def set_status(request_id: str, status: str):
         oid = ObjectId(request_id)
     except Exception:
         return None
+
+    # Get the original document first to check if status is changing
+    prev_doc = await _coll().find_one({"_id": oid})
+    if not prev_doc:
+        return None
+
     doc = await _coll().find_one_and_update(
         {"_id": oid},
         {"$set": {"status": status, "updated_at": datetime.utcnow()}},
         return_document=ReturnDocument.AFTER,
     )
+
+    # Notify users in background if status transitioned to uploaded or denied
+    if doc and prev_doc.get("status") != status and status in ("uploaded", "denied"):
+        asyncio.create_task(_notify_users_fulfilled(doc, status=status))
+
     return _shape(doc) if doc else None
 
 
@@ -483,10 +545,24 @@ async def auto_fulfill(tmdb_id=None, imdb_id=None, media_type: str = "movie") ->
         ors.append({"imdb_id": imdb_id})
     if not ors:
         return 0
+
+    query = {"media_type": media_type, "status": "pending", "$or": ors}
+
+    # Fetch matching pending requests so we can notify requesters
+    matching_docs = []
+    try:
+        async for item in _coll().find(query):
+            matching_docs.append(item)
+    except Exception as exc:
+        LOGGER.warning(f"[REQUEST] Error fetching matching requests to auto-fulfill: {exc}")
+
     result = await _coll().update_many(
-        {"media_type": media_type, "status": "pending", "$or": ors},
+        query,
         {"$set": {"status": "uploaded", "updated_at": datetime.utcnow()}},
     )
     if result.modified_count:
         LOGGER.info(f"[REQUEST] auto-fulfilled {result.modified_count} request(s) for {media_type} tmdb={tmdb_id} imdb={imdb_id}")
+        for item in matching_docs:
+            asyncio.create_task(_notify_users_fulfilled(item, status="uploaded"))
+
     return result.modified_count
