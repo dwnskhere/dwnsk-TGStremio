@@ -1,9 +1,10 @@
-"""Unit tests for approver notification formatting and duplicate suppression."""
+"""Tests for Rich Message season episode/quality audit notifications."""
 from __future__ import annotations
 
 import ast
 import asyncio
 import html
+import re
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,14 +12,18 @@ from types import SimpleNamespace
 
 SOURCE = Path(__file__).resolve().parents[1] / "Backend/helper/announcer.py"
 TREE = ast.parse(SOURCE.read_text(encoding="utf-8"))
+WANTED = {
+    "_as_int",
+    "_quality_sort_key",
+    "_quality_tiers_present",
+    "_build_season_quality_audit",
+    "_build_missing_episode_rich_message",
+    "_missing_episode_approver_ids",
+    "_notify_approvers_missing_episodes",
+}
 NODES = [
     node for node in TREE.body
-    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    and node.name in {
-        "_as_int",
-        "_missing_episode_approver_ids",
-        "_notify_approvers_missing_episodes",
-    }
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in WANTED
 ]
 
 
@@ -37,12 +42,25 @@ class FakeCollection:
         }
 
 
+class FakeBotAPI:
+    calls = []
+
+    @classmethod
+    async def request(cls, method, payload):
+        cls.calls.append({"method": method, "payload": payload})
+        return {"message_id": len(cls.calls)}
+
+
 class FakeBot:
     sent = []
 
     @classmethod
     async def send_message(cls, **kwargs):
         cls.sent.append(kwargs)
+
+
+class FakeBotAPIError(Exception):
+    pass
 
 
 class FakeLogger:
@@ -58,59 +76,118 @@ class FakeLogger:
 
 class MissingEpisodeNotifierTests(unittest.TestCase):
     def setUp(self):
+        FakeBotAPI.calls = []
         FakeBot.sent = []
         collection = FakeCollection()
         self.db = SimpleNamespace(
             dbs={"tracking": {"season_missing_episode_alerts": collection}}
         )
         settings = SimpleNamespace(current=lambda: SimpleNamespace(approver_ids=[101, 102]))
+
+        async def bot_api_request(method, payload):
+            return await FakeBotAPI.request(method, payload)
+
         namespace = {
             "SettingsManager": settings,
             "Telegram": SimpleNamespace(APPROVER_IDS=[], OWNER_ID=999),
             "_ANNOUNCEMENT_LOCKS": {},
             "asyncio": asyncio,
-            "html": html,
             "datetime": datetime,
             "timezone": timezone,
+            "html": html,
+            "re": re,
             "db": self.db,
             "StreamBot": FakeBot,
+            "_bot_api_request": bot_api_request,
+            "_BotAPIError": FakeBotAPIError,
             "LOGGER": FakeLogger(),
             "ParseMode": SimpleNamespace(HTML="HTML"),
         }
         exec(compile(ast.Module(body=NODES, type_ignores=[]), str(SOURCE), "exec"), namespace)
         self.notify = namespace["_notify_approvers_missing_episodes"]
+        self.audit = namespace["_build_season_quality_audit"]
 
-    def test_alert_contains_show_identity_and_missing_episode(self):
-        progress = {
-            "aired_episodes": {8: {"name": "The Final Door"}},
-            "episode_numbers": {1, 2, 3, 4, 5, 6, 7, 8},
-        }
-        asyncio.run(self.notify(
-            {"tmdb_id": 321, "title": "Sample Show", "year": 2024},
-            1, progress, {8}, 7,
+    def test_quality_tiers_are_independent_with_requested_substitutions(self):
+        season = {"episodes": [
+            {"episode_number": 1, "telegram": [{"quality": "1080p"}]},
+            {"episode_number": 2, "telegram": [{"quality": "540p"}]},
+            {"episode_number": 3, "telegram": [{"quality": "480p"}, {"quality": "720p"}]},
+            {"episode_number": 4, "telegram": [{"quality": "480p"}, {"quality": "720p"}, {"quality": "2160p"}]},
+        ]}
+        result = self.audit(season, {1, 2, 3, 4})
+        self.assertEqual(result["missing_episode_numbers"], set())
+        self.assertEqual(result["indexed_count"], 4)
+        self.assertEqual(result["quality_gaps"][1]["missing_tiers"], ["480p", "720p"])
+        self.assertEqual(result["quality_gaps"][2]["missing_tiers"], ["480p", "1080p"])
+        self.assertEqual(result["quality_gaps"][3]["missing_tiers"], ["1080p"])
+        self.assertNotIn(4, result["quality_gaps"])
+
+    def test_540p_substitutes_for_720p_and_higher_satisfies_1080p(self):
+        season = {"episodes": [
+            {"episode_number": 1, "telegram": [
+                {"quality": "480p"}, {"quality": "540p"}, {"quality": "4K"}
+            ]},
+        ]}
+        result = self.audit(season, {1})
+        self.assertEqual(result["quality_gaps"], {})
+
+    def test_missing_episode_and_dead_stream_are_all_missing(self):
+        season = {"episodes": [
+            {"episode_number": 2, "telegram": [{"quality": "1080p", "is_dead": True}]},
+            {"episode_number": 3, "telegram": [{"quality": "2160p", "is_dead": True}]},
+        ]}
+        result = self.audit(season, {1, 2, 3})
+        self.assertEqual(result["missing_episode_numbers"], {1, 2, 3})
+        self.assertEqual(result["indexed_count"], 0)
+        self.assertEqual(result["quality_gaps"], {})
+
+    def test_rich_message_contains_native_three_column_table_and_tmdb_link(self):
+        namespace = {}
+        helper_nodes = [
+            n for n in NODES
+            if getattr(n, "name", "") in {"_as_int", "_build_missing_episode_rich_message"}
+        ]
+        exec(compile(ast.Module(body=helper_nodes, type_ignores=[]), str(SOURCE), "exec"), namespace)
+        rich = namespace["_build_missing_episode_rich_message"](
+            {"tmdb_id": 123, "title": "Sample Show", "year": 2024},
+            1,
+            {"episode_numbers": {1, 2}, "aired_episodes": {1: {"name": "Episode One"}, 2: {"name": "Episode Two"}}},
+            [1],
+            {2: {"available_qualities": ["480p"], "missing_tiers": ["720p", "1080p"]}},
+            1,
+        )
+        blocks = rich["blocks"]
+        table = next(block for block in blocks if block["type"] == "table")
+        self.assertEqual(len(table["cells"][0]), 3)
+        self.assertIn("ALL MISSING", table["cells"][1][2]["text"])
+        self.assertIn("720p | 1080p", table["cells"][2][2]["text"])
+        self.assertTrue(any(
+            part.get("type") == "url" and part.get("url", "").endswith("/tv/123")
+            for block in blocks if isinstance(block.get("text"), list)
+            for part in block["text"] if isinstance(part, dict)
         ))
 
-        self.assertEqual(len(FakeBot.sent), 2)  # one DM per configured approver
-        text = FakeBot.sent[0]["text"]
-        self.assertIn("Sample Show (2024)", text)
-        self.assertIn("[TMDB ID: 321]", text)
-        self.assertIn("Season 01", text)
-        self.assertIn("S01E08", text)
-        self.assertIn("The Final Door", text)
-        self.assertIn("future episodes are excluded", text)
-
-    def test_same_missing_list_does_not_send_duplicate_alerts(self):
+    def test_notifier_sends_rich_message_and_deduplicates_episode_and_quality_state(self):
         progress = {
-            "aired_episodes": {8: {"name": "The Final Door"}},
-            "episode_numbers": {1, 2, 3, 4, 5, 6, 7, 8},
+            "aired_episodes": {8: {"name": "The Final Door"}, 9: {"name": "The New Threat"}},
+            "episode_numbers": set(range(1, 10)),
         }
         args = ({"tmdb_id": 321, "title": "Sample Show", "year": 2024}, 1, progress)
+        gaps = {9: {"available_qualities": ["480p"], "missing_tiers": ["720p", "1080p"]}}
+
         async def run():
-            await self.notify(*args, {8}, 7)
-            await self.notify(*args, {8}, 7)
-            await self.notify(*args, {9}, 7)
+            await self.notify(*args, {8}, 7, gaps)
+            await self.notify(*args, {8}, 7, gaps)
+            await self.notify(*args, {8}, 7, {
+                9: {"available_qualities": ["480p", "720p"], "missing_tiers": ["1080p"]}
+            })
+
         asyncio.run(run())
-        self.assertEqual(len(FakeBot.sent), 4)  # first state + changed state, to two approvers
+        self.assertEqual(len(FakeBotAPI.calls), 4)  # two changes for each of two approvers
+        self.assertTrue(all(call["method"] == "sendRichMessage" for call in FakeBotAPI.calls))
+        self.assertEqual(FakeBot.sent, [])
+        first_payload = FakeBotAPI.calls[0]["payload"]["rich_message"]
+        self.assertTrue(any(block["type"] == "table" for block in first_payload["blocks"]))
 
 
 if __name__ == "__main__":

@@ -1234,18 +1234,187 @@ def _missing_episode_approver_ids() -> list[int]:
     return result
 
 
+def _quality_tiers_present(qualities) -> set[str]:
+    """Map raw stream labels to independent audit tiers.
+
+    480p is its own tier. 540p is accepted as a substitute only for the 720p
+    tier. 1080p and any higher recognised resolution satisfy the 1080p tier.
+    Higher tiers never satisfy lower tiers.
+    """
+    present: set[str] = set()
+    for raw in qualities or []:
+        label = str(raw or "").strip().lower()
+        if not label:
+            continue
+        if re.search(r"(?<!\d)8\s*k(?!\w)", label):
+            present.add("1080p")
+            continue
+        if re.search(r"(?<!\d)4\s*k(?!\w)", label):
+            present.add("1080p")
+            continue
+        match = re.search(r"(?<!\d)(\d{3,4})\s*p?\b", label)
+        if not match:
+            continue
+        resolution = int(match.group(1))
+        if resolution == 480:
+            present.add("480p")
+        elif resolution in (540, 720):
+            present.add("720p")
+        elif resolution >= 1080:
+            present.add("1080p")
+    return present
+
+
+def _build_season_quality_audit(season: dict, aired_episode_numbers: set[int]) -> dict:
+    """Return missing episodes and independent quality gaps for aired episodes."""
+    expected = {_as_int(number, 0) for number in aired_episode_numbers if _as_int(number, 0) > 0}
+    episode_by_number = {
+        _as_int(item.get("episode_number"), 0): item
+        for item in (season or {}).get("episodes") or []
+        if _as_int(item.get("episode_number"), 0) > 0
+    }
+    completely_missing: set[int] = set()
+    quality_gaps: dict[int, dict] = {}
+    indexed_count = 0
+
+    for number in sorted(expected):
+        episode = episode_by_number.get(number) or {}
+        live_streams = [
+            stream for stream in (episode.get("telegram") or [])
+            if isinstance(stream, dict) and not stream.get("is_dead")
+        ]
+        if not live_streams:
+            completely_missing.add(number)
+            continue
+
+        indexed_count += 1
+        available = sorted({
+            str(stream.get("quality") or "").strip()
+            for stream in live_streams
+            if str(stream.get("quality") or "").strip()
+        }, key=_quality_sort_key)
+        present_tiers = _quality_tiers_present(available)
+        missing_tiers = [
+            tier for tier in ("480p", "720p", "1080p")
+            if tier not in present_tiers
+        ]
+        if missing_tiers:
+            quality_gaps[number] = {
+                "available_qualities": available,
+                "missing_tiers": missing_tiers,
+            }
+
+    return {
+        "missing_episode_numbers": completely_missing,
+        "indexed_count": indexed_count,
+        "quality_gaps": quality_gaps,
+    }
+
+
+def _build_missing_episode_rich_message(
+    info: dict,
+    season_number: int,
+    progress: dict,
+    missing_numbers: list[int],
+    quality_gaps: dict[int, dict],
+    indexed_count: int,
+) -> dict:
+    """Build a native Telegram Rich Message with an episode audit table."""
+    tmdb_id = _as_int(info.get("tmdb_id"), 0)
+    title = str(info.get("title") or progress.get("series_name") or "Unknown TV Show").strip()
+    year = _as_int(info.get("year"), _as_int(progress.get("year"), 0))
+    title_year = f"{title} ({year})" if year else title
+    aired_episodes = progress.get("aired_episodes") or {}
+    all_issue_numbers = sorted(set(missing_numbers) | set(quality_gaps))
+
+    cells = [[
+        {"text": "Episode", "is_header": True},
+        {"text": "Available", "is_header": True},
+        {"text": "Missing", "is_header": True},
+    ]]
+    for number in all_issue_numbers:
+        episode = aired_episodes.get(number) or {}
+        episode_title = str(episode.get("name") or "").strip()
+        code = f"S{season_number:02d}E{number:02d}"
+        episode_cell = [{"type": "bold", "text": code}]
+        if episode_title:
+            episode_cell.extend(["\n", episode_title])
+
+        if number in set(missing_numbers):
+            available_text = "—"
+            missing_text = "ALL MISSING"
+        else:
+            gap = quality_gaps[number]
+            available_text = " | ".join(gap.get("available_qualities") or []) or "Unclassified"
+            missing_text = " | ".join(gap.get("missing_tiers") or [])
+
+        cells.append([
+            {"text": episode_cell, "valign": "top"},
+            {"text": available_text, "valign": "top"},
+            {"text": missing_text, "valign": "top"},
+        ])
+
+    aired_count = len(progress.get("episode_numbers") or [])
+    total_quality_gaps = sum(len(gap.get("missing_tiers") or []) for gap in quality_gaps.values())
+    table_caption = f"Season {season_number:02d} — episode and quality audit"
+    tmdb_url = f"https://www.themoviedb.org/tv/{tmdb_id}"
+    footer = (
+        "Quality tiers are independent: 540p satisfies the 720p tier; "
+        "1440p, 2160p, 4K and higher satisfy the 1080p tier. "
+        "Higher tiers do not replace 480p or the 720p tier."
+    )
+    note = (
+        "Only regular episodes with an air date before today's IST date are audited. "
+        "Episodes dated today or in the future, and episodes without a valid air date, are excluded."
+    )
+
+    blocks = [
+        {"type": "heading", "size": 2, "text": "⚠️ Missing Episodes & Quality Audit"},
+        {
+            "type": "paragraph",
+            "text": [
+                "📺 ",
+                {"type": "bold", "text": title_year},
+                " · ",
+                {"type": "url", "text": f"TMDb ID: {tmdb_id}", "url": tmdb_url},
+            ],
+        },
+        {"type": "heading", "size": 3, "text": f"Season {season_number:02d}"},
+        {
+            "type": "paragraph",
+            "text": (
+                f"📦 Season coverage: {indexed_count}/{aired_count} aired episodes indexed · "
+                f"{len(missing_numbers)} completely missing · "
+                f"{len(quality_gaps)} with quality gaps · {total_quality_gaps} missing quality tiers"
+            ),
+        },
+        {
+            "type": "table",
+            "caption": table_caption,
+            "is_bordered": True,
+            "is_striped": True,
+            "is_compact": True,
+            "cells": cells,
+        },
+        {"type": "paragraph", "text": note},
+        {"type": "footer", "text": footer},
+    ]
+    return {"blocks": blocks}
+
+
 async def _notify_approvers_missing_episodes(
     info: dict,
     season_number: int,
     progress: dict,
     missing_numbers: set[int],
     indexed_count: int,
+    quality_gaps: dict[int, dict] | None = None,
 ) -> None:
-    """Notify approvers once per changed missing-episode set, per recipient.
+    """Send a deduplicated Rich Message audit to each configured approver.
 
-    Reconciler runs do not spam approvers. A new alert is sent only when the
-    missing list changes; successful delivery is tracked separately per user
-    so a failed recipient is retried without duplicating messages to others.
+    The audit state includes both completely missing episodes and the per-episode
+    missing quality tiers. A changed episode list or quality gap triggers a new
+    notification; unchanged reconciler runs do not.
     """
     tmdb_id = _as_int(info.get("tmdb_id"), 0)
     if not tmdb_id:
@@ -1259,38 +1428,24 @@ async def _notify_approvers_missing_episodes(
         )
         return
 
-    aired_episodes = progress.get("aired_episodes") or {}
     sorted_missing = sorted(
         _as_int(number, 0) for number in missing_numbers if _as_int(number, 0) > 0
     )
+    quality_gaps = quality_gaps or {}
+    quality_state = [
+        {
+            "episode_number": int(number),
+            "available_qualities": list(gap.get("available_qualities") or []),
+            "missing_tiers": list(gap.get("missing_tiers") or []),
+        }
+        for number, gap in sorted(quality_gaps.items(), key=lambda item: int(item[0]))
+    ]
     missing_state = sorted_missing
     record_key = f"tv:{tmdb_id}:season:{season_number:02d}"
     alert_collection = db.dbs["tracking"]["season_missing_episode_alerts"]
-
     title = str(info.get("title") or progress.get("series_name") or "Unknown TV Show").strip()
     year = _as_int(info.get("year"), _as_int(progress.get("year"), 0))
-    title_year = f"{title} ({year})" if year else title
-    episode_lines = []
-    for number in sorted_missing:
-        episode = aired_episodes.get(number) or {}
-        episode_title = str(episode.get("name") or "").strip()
-        code = f"S{season_number:02d}E{number:02d}"
-        suffix = f" — {episode_title}" if episode_title else ""
-        episode_lines.append(f"• <code>{code}</code>{html.escape(suffix, quote=False)}")
-
-    if sorted_missing:
-        text = (
-            "⚠️ <b>Missing Aired Episodes — Season Announcement Pending</b>\n\n"
-            f"📺 <b>{html.escape(title_year, quote=False)}</b> "
-            f"<code>[TMDB ID: {tmdb_id}]</code>\n"
-            f"<b>Season {season_number:02d} — Missing Episodes</b>\n"
-            + "\n".join(episode_lines)
-            + f"\n\n📦 <b>Indexed:</b> {indexed_count}/{len(progress.get('episode_numbers') or [])} aired episodes\n"
-            "<i>Only episodes with an air date before today's IST date are listed. Today's and future episodes are excluded until confirmed aired.</i>\n"
-            "Please add the missing aired episodes to the media library."
-        )
-    else:
-        text = ""
+    alert_format_version = 2
 
     for user_id in recipients:
         alert_id = f"{record_key}:approver:{user_id}"
@@ -1302,10 +1457,17 @@ async def _notify_approvers_missing_episodes(
                     _as_int(value, 0)
                     for value in (previous or {}).get("missing_episode_numbers", [])
                 )
-                if previous is not None and previous_missing == missing_state:
+                previous_quality_state = (previous or {}).get("missing_quality_tiers") or []
+                unchanged = (
+                    previous is not None
+                    and previous.get("alert_format_version") == alert_format_version
+                    and previous_missing == missing_state
+                    and previous_quality_state == quality_state
+                )
+                if unchanged:
                     continue
 
-                if not sorted_missing:
+                if not sorted_missing and not quality_state:
                     await alert_collection.update_one(
                         {"_id": alert_id},
                         {"$set": {
@@ -1313,6 +1475,8 @@ async def _notify_approvers_missing_episodes(
                             "season_number": season_number,
                             "approver_id": user_id,
                             "missing_episode_numbers": [],
+                            "missing_quality_tiers": [],
+                            "alert_format_version": alert_format_version,
                             "resolved_at": datetime.now(timezone.utc).replace(tzinfo=None),
                             "updated_at": datetime.now(timezone.utc).replace(tzinfo=None),
                         }},
@@ -1320,12 +1484,59 @@ async def _notify_approvers_missing_episodes(
                     )
                     continue
 
-                await StreamBot.send_message(
-                    chat_id=user_id,
-                    text=text,
-                    parse_mode=ParseMode.HTML,
-                    disable_web_page_preview=True,
+                rich_message = _build_missing_episode_rich_message(
+                    info,
+                    season_number,
+                    progress,
+                    sorted_missing,
+                    quality_gaps,
+                    indexed_count,
                 )
+                try:
+                    await _bot_api_request("sendRichMessage", {
+                        "chat_id": user_id,
+                        "rich_message": rich_message,
+                    })
+                except _BotAPIError as rich_error:
+                    # Keep approver notifications available on older Bot API
+                    # deployments by falling back to a readable HTML message.
+                    LOGGER.warning(
+                        f"Rich episode audit unavailable for approver {user_id}; "
+                        f"using HTML fallback: {rich_error}"
+                    )
+                    fallback_lines = [
+                        "⚠️ <b>Missing Episodes &amp; Quality Audit</b>",
+                        f"📺 <b>{html.escape(f'{title} ({year})' if year else title)}</b>",
+                        f"<a href=\"https://www.themoviedb.org/tv/{tmdb_id}\">TMDb ID: {tmdb_id}</a>",
+                        f"<b>Season {season_number:02d}</b>",
+                        "<b>Episode | Available | Missing</b>",
+                    ]
+                    aired_episodes = progress.get("aired_episodes") or {}
+                    for number in sorted(set(sorted_missing) | set(quality_gaps)):
+                        episode = aired_episodes.get(number) or {}
+                        code = f"S{season_number:02d}E{number:02d}"
+                        episode_title = html.escape(str(episode.get("name") or ""))
+                        label = f"<code>{code}</code> — {episode_title}" if episode_title else f"<code>{code}</code>"
+                        if number in set(sorted_missing):
+                            available, missing = "—", "ALL MISSING"
+                        else:
+                            gap = quality_gaps[number]
+                            available = " | ".join(gap.get("available_qualities") or []) or "Unclassified"
+                            missing = " | ".join(gap.get("missing_tiers") or [])
+                        fallback_lines.append(
+                            f"{label}\nAvailable: {html.escape(available)}\nMissing: {html.escape(missing)}"
+                        )
+                    fallback_lines.extend([
+                        "<i>540p satisfies the 720p tier. 1440p/2160p/4K+ satisfy the 1080p tier; tiers are otherwise independent.</i>",
+                        "<i>Only episodes aired before today's IST date are included.</i>",
+                    ])
+                    await StreamBot.send_message(
+                        chat_id=user_id,
+                        text="\n\n".join(fallback_lines),
+                        parse_mode=ParseMode.HTML,
+                        disable_web_page_preview=True,
+                    )
+
                 await alert_collection.update_one(
                     {"_id": alert_id},
                     {"$set": {
@@ -1335,20 +1546,23 @@ async def _notify_approvers_missing_episodes(
                         "season_number": season_number,
                         "approver_id": user_id,
                         "missing_episode_numbers": missing_state,
+                        "missing_quality_tiers": quality_state,
                         "indexed_aired_episode_count": indexed_count,
                         "expected_aired_episode_count": len(progress.get("episode_numbers") or []),
+                        "alert_format_version": alert_format_version,
                         "notified_at": datetime.now(timezone.utc).replace(tzinfo=None),
                         "updated_at": datetime.now(timezone.utc).replace(tzinfo=None),
                     }},
                     upsert=True,
                 )
                 LOGGER.info(
-                    f"Sent missing aired episode alert to approver {user_id} for "
-                    f"tv={tmdb_id} S{season_number:02d}: missing episode numbers={missing_state}"
+                    f"Sent missing episode/quality audit to approver {user_id} for "
+                    f"tv={tmdb_id} S{season_number:02d}: missing episodes={missing_state}, "
+                    f"quality-gap episodes={[item['episode_number'] for item in quality_state]}"
                 )
             except Exception as e:
                 LOGGER.warning(
-                    f"Failed to notify approver {user_id} about missing episodes for "
+                    f"Failed to notify approver {user_id} about missing episodes/qualities for "
                     f"tv={tmdb_id} S{season_number:02d}: {e}"
                 )
 
@@ -1496,18 +1710,15 @@ async def _maybe_consolidate_season(info: dict, doc: dict, chat) -> bool:
     progress = await _get_tmdb_season_progress(tmdb_id, season_number)
     if progress:
         aired_numbers = set(progress.get("episode_numbers") or [])
-        indexed_aired_numbers = {
-            number for episode in (season.get("episodes") or [])
-            if (number := _as_int(episode.get("episode_number"), 0)) in aired_numbers
-            and any(not item.get("is_dead") for item in (episode.get("telegram") or []))
-        }
-        missing_aired_numbers = aired_numbers - indexed_aired_numbers
+        quality_audit = _build_season_quality_audit(season, aired_numbers)
+        missing_aired_numbers = quality_audit["missing_episode_numbers"]
         await _notify_approvers_missing_episodes(
             info,
             season_number,
             progress,
             missing_aired_numbers,
-            len(indexed_aired_numbers),
+            quality_audit["indexed_count"],
+            quality_audit["quality_gaps"],
         )
 
     # Keep the existing season-completion rule: no consolidated season post

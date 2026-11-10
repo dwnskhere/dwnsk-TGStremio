@@ -1,77 +1,64 @@
-# Missing Aired Episode Alerts for Approvers
+# Missing Episode & Quality Audit Alerts for Approvers
 
 ## Scope
 
-This change implements the missing-season-episode notification only. The subscription-expiry `CHAT_ID_INVALID` issue is intentionally unchanged and remains a separate follow-up.
+This update expands the existing approver notification sent by the season reconciler. It keeps the existing `Season announcement pending...` INFO log and the existing `APPROVER_IDS` recipient routing. The subscription-expiry `CHAT_ID_INVALID` code path is not changed.
 
-## Behaviour
+## Telegram message format
 
-When the existing season consolidation check runs, the bot now also checks the complete TMDb season episode response for regular episodes whose `air_date` is strictly before the current date in `Asia/Kolkata`. TMDb's season response provides a date but not a reliable per-episode release time, so episodes dated today are held until the next IST calendar day to avoid alerting for an episode that may still be scheduled to air later today.
+Notifications are sent through the official Telegram Bot API `sendRichMessage` method using an `InputRichMessage` with explicit blocks and an `InputRichBlockTable`. The table contains three columns:
 
-For each season:
+- **Episode** — season/episode code and TMDb episode title.
+- **Available** — detected non-dead stream quality labels.
+- **Missing** — `ALL MISSING` if no live stream exists, otherwise the expected quality tiers that are absent.
 
-1. Fetch the TV show and season metadata from TMDb.
-2. Verify that TMDb returned the full season episode list. Partial metadata is not used to generate a missing-episode alert.
-3. Exclude specials, season-zero entries and synthetic combined-pack episode numbers.
-4. Include only episodes with a valid `air_date` that is today or earlier.
-5. Compare those aired episode numbers with the indexed season records. An episode counts as indexed only when it has at least one non-dead Telegram stream.
-6. Send a private HTML-formatted notification to each configured approver when the missing episode list changes.
-7. Keep the existing season-pending log message and existing season-consolidation rules.
+The message also includes the TV show title/year, a clickable TMDb ID, season number, season coverage, the number of episodes missing entirely, the number of episodes with quality gaps, and a short explanatory footer. If the Rich Message method is unavailable, the notifier falls back to a readable HTML message with the same episode and quality details.
 
-Episodes dated today or later, plus episodes with missing/invalid air dates, are not listed as missing. A season with future or same-day episodes is still not consolidated; the existing all-regular-episodes-must-have-aired rule remains intact.
+Only episodes needing attention appear in the table. Fully indexed episodes with all expected tiers are omitted.
 
-## Example notification
+## Independent quality audit (Option A)
 
-```text
-⚠️ Missing Aired Episodes — Season Announcement Pending
+Each episode is checked independently for these three tiers:
 
-📺 The Family Man (2021) [TMDB ID: 123456]
-Season 02 — Missing Episodes
-• S02E04 — Exile
-• S02E07 — The New Threat
+| Tier | Accepted stored quality labels |
+| --- | --- |
+| 480p | `480p` |
+| 720p | `720p` or `540p` |
+| 1080p | `1080p`, `1440p`, `2160p`, `4K`, `8K`, or another parsed resolution above 1080p |
 
-📦 Indexed: 6/8 aired episodes
-Only episodes with an air date before today's IST date are listed. Today's and future episodes are excluded until confirmed aired.
-Please add the missing aired episodes to the media library.
-```
+The tiers are independent. For example, an episode containing only `1080p` is reported as missing `480p` and `720p`. A higher tier does not satisfy a lower tier. `540p` is accepted only as the substitute for the 720p tier; the original stored label remains unchanged in the Available column.
 
-The actual message uses Telegram HTML formatting, with the series name/year, TMDb ID, season number and each missing episode code/title.
+Unknown labels do not satisfy any expected tier. They may still be shown in Available for an episode that has a live stream. Dead streams are excluded from both the indexed-episode and quality-tier checks.
 
-## Recipients
+## Aired-episode filtering
 
-Recipients are read from the current `APPROVER_IDS` setting in SettingsManager. If that list is empty, the environment-backed `Telegram.APPROVER_IDS` list is used. It does not fall back to `OWNER_ID`; only configured subscription approvers receive these alerts.
+The audit uses the existing TMDb season metadata response and existing `Asia/Kolkata` date handling. Only regular episodes with a valid air date strictly before the current IST calendar date are included. Specials, season-zero/synthetic entries, episodes dated today or in the future, and episodes with missing/invalid air dates are excluded. Incomplete TMDb season metadata is not used to produce an audit.
 
-Each approver must have opened the bot and pressed `/start` at least once so the bot can initiate a private conversation.
+## Season consolidation remains independent
 
-## Duplicate prevention and retries
+The quality audit does not make quality completeness a prerequisite for season consolidation. An episode counts as indexed for season consolidation if it has at least one non-dead stream, as before. The consolidated season announcement still waits for every regular metadata episode to have aired and every expected aired episode to have at least one active stream. Missing optional quality tiers are reported to approvers but do not block consolidation.
 
-Alert state is stored in the tracking database collection `season_missing_episode_alerts`, with one record per TV show, season and approver.
+## Notification state and deduplication
 
-- The same missing episode list is notified only once per approver.
-- If the missing list changes, a new notification is sent with the current list.
-- If the season becomes complete, the stored missing list is cleared without sending a separate completion DM.
-- A failed send is not marked as delivered, so the next season check retries it.
-- Delivery is tracked independently per approver; a failure for one approver does not cause duplicates for other approvers.
+State remains in `tracking.season_missing_episode_alerts`, one record per TV show, season, and approver. The state now contains:
 
-## Logging
+- `missing_episode_numbers` — episodes with no active stream;
+- `missing_quality_tiers` — each episode's available labels and missing expected tiers;
+- `alert_format_version` — format version `2`, ensuring existing episode-only alert states receive the new audit format once.
 
-The existing log line is retained:
-
-```text
-Season announcement pending for tv=<TMDB_ID> S<SEASON>: indexed <INDEXED>/<AIRED_EXPECTED> released metadata episodes; missing episode numbers=[...]
-```
-
-A successful private alert also writes an INFO log identifying the approver and missing episode numbers. A failed send writes a WARNING log. The subscription-expiry `CHAT_ID_INVALID` path is not modified.
+A new notification is sent only when the missing-episode set or quality-gap state changes. Unchanged hourly reconciliation runs do not send duplicates. When all episode and quality issues are resolved, the state is cleared without sending a separate completion DM. Each approver's delivery and retry remains independent.
 
 ## Validation
 
-The source includes focused tests for:
+The source includes tests for:
 
-- excluding future episodes and specials from the alertable list;
-- ignoring episodes without valid air dates;
-- refusing to alert from incomplete TMDb metadata;
-- preserving season completion when every regular episode has aired;
-- notification message fields and per-approver duplicate suppression.
+- independent quality tiers (1080p does not satisfy 480p/720p);
+- acceptance of 540p for the 720p tier;
+- acceptance of 1440p/2160p/4K+ for the 1080p tier;
+- all-missing episodes and exclusion of dead streams;
+- native Telegram Rich Message table generation and clickable TMDb link;
+- quality-gap changes triggering a new notification while unchanged state is deduplicated;
+- existing aired-episode filtering for future dates, specials, and incomplete TMDb metadata.
 
 Run:
 
@@ -80,4 +67,4 @@ python -m compileall -q Backend tests
 python -m unittest tests.test_missing_episode_alert_logic tests.test_missing_episode_notifier -v
 ```
 
-A live TMDb/Telegram/MongoDB deployment test is still required after deployment.
+A live Telegram/TMDb/MongoDB test is still required after deployment.
