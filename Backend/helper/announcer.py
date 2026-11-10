@@ -12,6 +12,7 @@ import html
 import re
 import time
 from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 from typing import Any
 
 import httpx
@@ -34,6 +35,7 @@ _SEASON_NEGATIVE_CACHE_TTL = 5 * 60
 _IMAGE_CACHE_TTL = 6 * 60 * 60
 _RECONCILE_INTERVAL_SECONDS = 60 * 60
 _SEASON_METADATA_CACHE: dict[tuple[int, int], tuple[float, dict | None]] = {}
+_SEASON_PROGRESS_CACHE: dict[tuple[int, int], tuple[float, dict | None]] = {}
 _TMDB_IMAGE_CACHE: dict[tuple, tuple[float, dict]] = {}
 _ANNOUNCEMENT_LOCKS: dict[str, asyncio.Lock] = {}
 _ANNOUNCEMENT_RECONCILER_TASK: asyncio.Task | None = None
@@ -1050,11 +1052,137 @@ async def _publish_or_update(key: str, chat, info: dict, season_metadata: dict |
         )
 
 
-async def _get_tmdb_season_metadata(tmdb_id, season_number: int) -> dict | None:
-    """Return a season's complete, already-aired TMDb episode list.
+async def _get_tmdb_season_progress(tmdb_id, season_number: int) -> dict | None:
+    """Return complete TMDb episode metadata split into aired and not-yet-aired.
 
-    Consolidation is deliberately conservative: missing API keys, incomplete
-    metadata, missing air dates, and future-dated episodes all prevent it.
+    A complete metadata response is required before issuing missing-episode
+    alerts. Episodes without a valid air date are deliberately not classified
+    as aired, preventing false alerts for upcoming or not-yet-scheduled episodes.
+    """
+    tmdb_id_int = _as_int(tmdb_id)
+    if not tmdb_id_int or season_number <= 0:
+        return None
+
+    cache_key = (tmdb_id_int, season_number)
+    cached = _SEASON_PROGRESS_CACHE.get(cache_key)
+    if cached:
+        cache_age = time.monotonic() - cached[0]
+        cache_ttl = _SEASON_NEGATIVE_CACHE_TTL if cached[1] is None else _SEASON_CACHE_TTL
+        if cache_age < cache_ttl:
+            return cached[1]
+
+    api_key = tmdb_provider.tmdb_api_key()
+    if not api_key:
+        LOGGER.warning("Season episode checks are waiting: TMDb API key is not configured.")
+        _SEASON_PROGRESS_CACHE[cache_key] = (time.monotonic(), None)
+        return None
+
+    base = "https://api.themoviedb.org/3"
+    try:
+        async with tmdb_provider.API_SEMAPHORE:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=8.0)) as client:
+                show_response, season_response = await asyncio.gather(
+                    client.get(
+                        f"{base}/tv/{tmdb_id_int}",
+                        params={"api_key": api_key, "language": "en-US"},
+                    ),
+                    client.get(
+                        f"{base}/tv/{tmdb_id_int}/season/{season_number}",
+                        params={"api_key": api_key, "language": "en-US"},
+                    ),
+                )
+
+        if show_response.status_code != 200 or season_response.status_code != 200:
+            LOGGER.debug(
+                f"TMDb season metadata unavailable for tv={tmdb_id_int} season={season_number}: "
+                f"show={show_response.status_code}, season={season_response.status_code}"
+            )
+            _SEASON_PROGRESS_CACHE[cache_key] = (time.monotonic(), None)
+            return None
+
+        show_data = show_response.json()
+        season_data = season_response.json()
+        season_summary = next((
+            item for item in (show_data.get("seasons") or [])
+            if _as_int(item.get("season_number"), -1) == season_number
+        ), None)
+        expected_count = _as_int((season_summary or {}).get("episode_count"), 0)
+        metadata_episodes = season_data.get("episodes") or []
+        if expected_count <= 0:
+            expected_count = len(metadata_episodes)
+
+        # Never alert from a partial TMDb response: it could omit an aired EP.
+        if not metadata_episodes or (expected_count > 0 and len(metadata_episodes) < expected_count):
+            LOGGER.debug(
+                f"TMDb season metadata incomplete for tv={tmdb_id_int} S{season_number:02d}: "
+                f"returned {len(metadata_episodes)}/{expected_count} episode records"
+            )
+            _SEASON_PROGRESS_CACHE[cache_key] = (time.monotonic(), None)
+            return None
+
+        # The application logs use IST; compare date-only TMDb air dates against
+        # the same local calendar date so an episode airing today is not future.
+        try:
+            today = datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Kolkata")).date()
+        except Exception:
+            today = date.today()
+        aired_episodes: dict[int, dict] = {}
+        has_unreleased_or_unknown_regular_episode = False
+        for episode in metadata_episodes:
+            number = _as_int(episode.get("episode_number"), 0)
+            episode_type = str(episode.get("episode_type") or "standard").lower()
+            if number <= 0 or number >= 1000 or episode_type == "special":
+                continue
+
+            air_date = str(episode.get("air_date") or "").strip()
+            if not air_date:
+                has_unreleased_or_unknown_regular_episode = True
+                continue
+            try:
+                parsed_date = date.fromisoformat(air_date[:10])
+            except ValueError:
+                LOGGER.debug(
+                    f"TMDb season metadata has invalid air_date={air_date!r} "
+                    f"for tv={tmdb_id_int} S{season_number:02d}E{number:02d}"
+                )
+                has_unreleased_or_unknown_regular_episode = True
+                continue
+
+            # TMDb supplies a date but not a reliable per-episode release time.
+            # Treat today's date as not-yet-confirmed so an upcoming episode
+            # scheduled later today is never included in a missing alert.
+            if parsed_date >= today:
+                has_unreleased_or_unknown_regular_episode = True
+                continue
+            aired_episodes[number] = episode
+
+        result = {
+            "aired_episodes": aired_episodes,
+            "episode_numbers": set(aired_episodes),
+            "all_regular_episodes_aired": not has_unreleased_or_unknown_regular_episode,
+            "season_name": str(season_data.get("name") or f"Season {season_number}"),
+            "series_name": str(show_data.get("name") or show_data.get("original_name") or ""),
+            "year": str(show_data.get("first_air_date") or "")[:4],
+            "season_overview": str(season_data.get("overview") or ""),
+            "poster_path": str(season_data.get("poster_path") or ""),
+            "expected_count": expected_count,
+        }
+        _SEASON_PROGRESS_CACHE[cache_key] = (time.monotonic(), result)
+        return result
+    except Exception as e:
+        LOGGER.warning(
+            f"TMDb season metadata check failed for tv={tmdb_id_int} "
+            f"season={season_number} ({type(e).__name__})."
+        )
+        _SEASON_PROGRESS_CACHE[cache_key] = (time.monotonic(), None)
+        return None
+
+
+async def _get_tmdb_season_metadata(tmdb_id, season_number: int) -> dict | None:
+    """Return a season checklist only after every regular episode has aired.
+
+    Consolidation remains conservative. The separate progress helper can still
+    identify already-aired missing episodes while a season has future dates.
     """
     tmdb_id_int = _as_int(tmdb_id)
     if not tmdb_id_int or season_number <= 0:
@@ -1068,61 +1196,161 @@ async def _get_tmdb_season_metadata(tmdb_id, season_number: int) -> dict | None:
         if cache_age < cache_ttl:
             return cached[1]
 
-    api_key = tmdb_provider.tmdb_api_key()
-    if not api_key:
-        LOGGER.warning("Season consolidation is waiting: TMDb API key is not configured.")
+    progress = await _get_tmdb_season_progress(tmdb_id_int, season_number)
+    if not progress or not progress.get("all_regular_episodes_aired"):
         _SEASON_METADATA_CACHE[cache_key] = (time.monotonic(), None)
         return None
 
-    base = "https://api.themoviedb.org/3"
-    try:
-        async with tmdb_provider.API_SEMAPHORE:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=8.0)) as client:
-                show_response, season_response = await asyncio.gather(
-                    client.get(f"{base}/tv/{tmdb_id_int}", params={"api_key": api_key, "language": "en-US"}),
-                    client.get(f"{base}/tv/{tmdb_id_int}/season/{season_number}", params={"api_key": api_key, "language": "en-US"}),
-                )
-        if show_response.status_code != 200 or season_response.status_code != 200:
-            LOGGER.debug(
-                f"TMDb season metadata unavailable for tv={tmdb_id_int} season={season_number}: "
-                f"show={show_response.status_code}, season={season_response.status_code}"
-            )
-            return None
-        show_data = show_response.json()
-        season_data = season_response.json()
-        season_summary = next((
-            item for item in (show_data.get("seasons") or [])
-            if _as_int(item.get("season_number"), -1) == season_number
-        ), None)
-        expected_count = _as_int((season_summary or {}).get("episode_count"), 0)
-        metadata_episodes = season_data.get("episodes") or []
-        if expected_count <= 0 and metadata_episodes:
-            # Some TMDb responses omit episode_count from the series season
-            # summary while still returning the full season episode list.
-            expected_count = len(metadata_episodes)
-
-        # The metadata list must be complete and every regular episode must
-        # have aired before it can be used as the consolidation checklist.
-        episode_numbers = _released_regular_episode_numbers(metadata_episodes, expected_count)
-        if not episode_numbers:
-            _SEASON_METADATA_CACHE[cache_key] = (time.monotonic(), None)
-            return None
-
-        result = {
-            "episode_numbers": episode_numbers,
-            "season_name": str(season_data.get("name") or f"Season {season_number}"),
-            "season_overview": str(season_data.get("overview") or ""),
-            "poster_path": str(season_data.get("poster_path") or ""),
-            "expected_count": expected_count,
-        }
-        _SEASON_METADATA_CACHE[cache_key] = (time.monotonic(), result)
-        return result
-    except Exception as e:
-        LOGGER.warning(
-            f"TMDb season completion check failed for tv={tmdb_id_int} "
-            f"season={season_number} ({type(e).__name__})."
-        )
+    episode_numbers = progress.get("episode_numbers") or set()
+    if not episode_numbers:
+        _SEASON_METADATA_CACHE[cache_key] = (time.monotonic(), None)
         return None
+
+    result = {
+        "episode_numbers": set(episode_numbers),
+        "season_name": progress.get("season_name") or f"Season {season_number}",
+        "season_overview": progress.get("season_overview") or "",
+        "poster_path": progress.get("poster_path") or "",
+        "expected_count": progress.get("expected_count") or len(episode_numbers),
+    }
+    _SEASON_METADATA_CACHE[cache_key] = (time.monotonic(), result)
+    return result
+
+
+def _missing_episode_approver_ids() -> list[int]:
+    """Resolve recipients strictly from the configured subscription approvers."""
+    try:
+        recipients = list(SettingsManager.current().approver_ids or Telegram.APPROVER_IDS or [])
+    except Exception:
+        recipients = list(Telegram.APPROVER_IDS or [])
+
+    result = []
+    seen = set()
+    for value in recipients:
+        user_id = _as_int(value, 0)
+        if user_id > 0 and user_id not in seen:
+            seen.add(user_id)
+            result.append(user_id)
+    return result
+
+
+async def _notify_approvers_missing_episodes(
+    info: dict,
+    season_number: int,
+    progress: dict,
+    missing_numbers: set[int],
+    indexed_count: int,
+) -> None:
+    """Notify approvers once per changed missing-episode set, per recipient.
+
+    Reconciler runs do not spam approvers. A new alert is sent only when the
+    missing list changes; successful delivery is tracked separately per user
+    so a failed recipient is retried without duplicating messages to others.
+    """
+    tmdb_id = _as_int(info.get("tmdb_id"), 0)
+    if not tmdb_id:
+        return
+
+    recipients = _missing_episode_approver_ids()
+    if not recipients:
+        LOGGER.debug(
+            f"Missing-episode alert skipped for tv={tmdb_id} S{season_number:02d}: "
+            "APPROVER_IDS is empty."
+        )
+        return
+
+    aired_episodes = progress.get("aired_episodes") or {}
+    sorted_missing = sorted(
+        _as_int(number, 0) for number in missing_numbers if _as_int(number, 0) > 0
+    )
+    missing_state = sorted_missing
+    record_key = f"tv:{tmdb_id}:season:{season_number:02d}"
+    alert_collection = db.dbs["tracking"]["season_missing_episode_alerts"]
+
+    title = str(info.get("title") or progress.get("series_name") or "Unknown TV Show").strip()
+    year = _as_int(info.get("year"), _as_int(progress.get("year"), 0))
+    title_year = f"{title} ({year})" if year else title
+    episode_lines = []
+    for number in sorted_missing:
+        episode = aired_episodes.get(number) or {}
+        episode_title = str(episode.get("name") or "").strip()
+        code = f"S{season_number:02d}E{number:02d}"
+        suffix = f" — {episode_title}" if episode_title else ""
+        episode_lines.append(f"• <code>{code}</code>{html.escape(suffix, quote=False)}")
+
+    if sorted_missing:
+        text = (
+            "⚠️ <b>Missing Aired Episodes — Season Announcement Pending</b>\n\n"
+            f"📺 <b>{html.escape(title_year, quote=False)}</b> "
+            f"<code>[TMDB ID: {tmdb_id}]</code>\n"
+            f"<b>Season {season_number:02d} — Missing Episodes</b>\n"
+            + "\n".join(episode_lines)
+            + f"\n\n📦 <b>Indexed:</b> {indexed_count}/{len(progress.get('episode_numbers') or [])} aired episodes\n"
+            "<i>Only episodes with an air date before today's IST date are listed. Today's and future episodes are excluded until confirmed aired.</i>\n"
+            "Please add the missing aired episodes to the media library."
+        )
+    else:
+        text = ""
+
+    for user_id in recipients:
+        alert_id = f"{record_key}:approver:{user_id}"
+        lock = _ANNOUNCEMENT_LOCKS.setdefault(f"missing-alert:{alert_id}", asyncio.Lock())
+        async with lock:
+            try:
+                previous = await alert_collection.find_one({"_id": alert_id})
+                previous_missing = sorted(
+                    _as_int(value, 0)
+                    for value in (previous or {}).get("missing_episode_numbers", [])
+                )
+                if previous is not None and previous_missing == missing_state:
+                    continue
+
+                if not sorted_missing:
+                    await alert_collection.update_one(
+                        {"_id": alert_id},
+                        {"$set": {
+                            "tmdb_id": tmdb_id,
+                            "season_number": season_number,
+                            "approver_id": user_id,
+                            "missing_episode_numbers": [],
+                            "resolved_at": datetime.now(timezone.utc).replace(tzinfo=None),
+                            "updated_at": datetime.now(timezone.utc).replace(tzinfo=None),
+                        }},
+                        upsert=True,
+                    )
+                    continue
+
+                await StreamBot.send_message(
+                    chat_id=user_id,
+                    text=text,
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                )
+                await alert_collection.update_one(
+                    {"_id": alert_id},
+                    {"$set": {
+                        "tmdb_id": tmdb_id,
+                        "title": title,
+                        "year": year or None,
+                        "season_number": season_number,
+                        "approver_id": user_id,
+                        "missing_episode_numbers": missing_state,
+                        "indexed_aired_episode_count": indexed_count,
+                        "expected_aired_episode_count": len(progress.get("episode_numbers") or []),
+                        "notified_at": datetime.now(timezone.utc).replace(tzinfo=None),
+                        "updated_at": datetime.now(timezone.utc).replace(tzinfo=None),
+                    }},
+                    upsert=True,
+                )
+                LOGGER.info(
+                    f"Sent missing aired episode alert to approver {user_id} for "
+                    f"tv={tmdb_id} S{season_number:02d}: missing episode numbers={missing_state}"
+                )
+            except Exception as e:
+                LOGGER.warning(
+                    f"Failed to notify approver {user_id} about missing episodes for "
+                    f"tv={tmdb_id} S{season_number:02d}: {e}"
+                )
 
 
 def _build_episode_info(info: dict, doc: dict | None, season_number: int, episode_number: int) -> dict:
@@ -1254,6 +1482,36 @@ async def _maybe_consolidate_season(info: dict, doc: dict, chat) -> bool:
     if not tmdb_id or season_number <= 0:
         return False
 
+    season = _find_season(doc, season_number)
+    if not season:
+        LOGGER.warning(
+            f"Season announcement cannot run for tv={tmdb_id} S{season_number:02d}: "
+            "season is absent from the indexed media document."
+        )
+        return False
+
+    # Progress includes already-aired episodes even when the same season also
+    # contains future episodes. That lets us alert approvers without treating
+    # the season as complete prematurely.
+    progress = await _get_tmdb_season_progress(tmdb_id, season_number)
+    if progress:
+        aired_numbers = set(progress.get("episode_numbers") or [])
+        indexed_aired_numbers = {
+            number for episode in (season.get("episodes") or [])
+            if (number := _as_int(episode.get("episode_number"), 0)) in aired_numbers
+            and any(not item.get("is_dead") for item in (episode.get("telegram") or []))
+        }
+        missing_aired_numbers = aired_numbers - indexed_aired_numbers
+        await _notify_approvers_missing_episodes(
+            info,
+            season_number,
+            progress,
+            missing_aired_numbers,
+            len(indexed_aired_numbers),
+        )
+
+    # Keep the existing season-completion rule: no consolidated season post
+    # until every regular metadata episode has actually aired.
     metadata = await _get_tmdb_season_metadata(tmdb_id, season_number)
     if not metadata:
         LOGGER.debug(
@@ -1262,13 +1520,6 @@ async def _maybe_consolidate_season(info: dict, doc: dict, chat) -> bool:
         )
         return False
 
-    season = _find_season(doc, season_number)
-    if not season:
-        LOGGER.warning(
-            f"Season announcement cannot run for tv={tmdb_id} S{season_number:02d}: "
-            "season is absent from the indexed media document."
-        )
-        return False
     expected_numbers = metadata["episode_numbers"]
     indexed_numbers = {
         number for episode in (season.get("episodes") or [])
@@ -1289,7 +1540,7 @@ async def _maybe_consolidate_season(info: dict, doc: dict, chat) -> bool:
     if not await _publish_or_update(key, chat, season_info, metadata):
         return False
 
-    # Only remove episode posts after the season post has been confirmed.
+    # Only remove episode posts after the consolidated season post is confirmed.
     await _cleanup_episode_announcements(tmdb_id, season_number, key)
     LOGGER.info(
         f"Published consolidated season announcement for tv={tmdb_id} S{season_number:02d} "
