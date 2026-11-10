@@ -533,8 +533,9 @@
                 <input type="text" id="plan-daily-cap" class="glass-input" required placeholder="e.g. 50 or Unlimited">
             </div>
             <div class="modal-field">
-                <label for="plan-monthly-cap">Monthly Cap (GB)</label>
-                <input type="text" id="plan-monthly-cap" class="glass-input" required placeholder="e.g. 1000 or Unlimited">
+                <label for="plan-monthly-cap">Monthly Cap</label>
+                <input type="text" id="plan-monthly-cap" class="glass-input" value="Unlimited" readonly aria-readonly="true">
+                <small class="text-soft">Monthly usage is unlimited for all plans in this release. The field is retained for a future update.</small>
             </div>
             <div>
                 <label for="plan-currency">Currency</label>
@@ -714,7 +715,7 @@
         document.getElementById('plan-days').value = plan?.days ?? '';
         document.getElementById('plan-price').value = plan?.price ?? '';
         document.getElementById('plan-daily-cap').value = plan?.daily_cap_gb ?? '';
-        document.getElementById('plan-monthly-cap').value = plan?.monthly_cap ?? 'Unlimited';
+        document.getElementById('plan-monthly-cap').value = 'Unlimited';
         const cur = document.getElementById('plan-currency');
         if (cur) cur.value = (plan?.currency || 'INR').toUpperCase();
         document.getElementById('plan-modal-title').innerText = id ? 'Edit Plan' : 'Add New Plan';
@@ -742,7 +743,7 @@
             price: parseFloat(document.getElementById('plan-price').value),
             currency: (document.getElementById('plan-currency') || {}).value || 'INR',
             daily_cap_gb: document.getElementById('plan-daily-cap').value.trim(),
-            monthly_cap: document.getElementById('plan-monthly-cap').value.trim()
+            monthly_cap: 'Unlimited'
         };
 
         try {

@@ -90,6 +90,27 @@ class PublicSiteSafetyTests(unittest.TestCase):
         self.assertIn("Depends(require_auth)", admin_source)
         self.assertIn("include_router(public_site_router)", main_source)
 
+    def test_public_plans_homepage_contains_approved_service_information(self):
+        template = (Path(__file__).resolve().parents[1] / "Backend/fastapi/templates/public_plans.html").read_text(encoding="utf-8")
+        route_source = SOURCE.read_text(encoding="utf-8")
+        for phrase in (
+            "Our collection at a glance", "What CodecIndex offers", "How CodecIndex works",
+            "Plans, usage &amp; access", "Payment &amp; activation information",
+            "Questions, answered", "Fair use &amp; service information", "Useful links",
+            "Monthly usage: Unlimited (current offering)",
+        ):
+            self.assertIn(phrase, template)
+        self.assertIn("library_stats = await _public_stats()", route_source)
+        self.assertIn("https://t.me/CodecIndex/5", route_source)
+        self.assertNotIn("testimonial", template.casefold())
+        self.assertNotIn("customer review", template.casefold())
+
+    def test_plan_admin_monthly_cap_is_fixed_for_current_release(self):
+        admin_template = (Path(__file__).resolve().parents[1] / "Backend/fastapi/templates/subscriptions_manage.html").read_text(encoding="utf-8")
+        settings_template = (Path(__file__).resolve().parents[1] / "Backend/fastapi/templates/settings.html").read_text(encoding="utf-8")
+        self.assertIn("id=\"plan-monthly-cap\" class=\"glass-input\" value=\"Unlimited\" readonly", admin_template)
+        self.assertIn("public_support_contact", settings_template)
+
     def test_detail_lookup_does_not_fall_back_to_older_public_duplicate(self):
         class FakeCollection:
             def __init__(self, doc):
@@ -260,11 +281,19 @@ class PublicSiteSafetyTests(unittest.TestCase):
         api = (root / "Backend/fastapi/routes/api_routes.py").read_text(encoding="utf-8")
         for field_id in ("plan-name", "plan-days", "plan-price", "plan-daily-cap", "plan-monthly-cap"):
             self.assertIn(field_id, template)
-        for field in ('"name": name.strip()', '"daily_cap_gb": daily_cap_gb', '"monthly_cap": monthly_cap'):
+        for field in ('"name": name.strip()', '"daily_cap_gb": daily_cap_gb', '"monthly_cap": "Unlimited"'):
             self.assertIn(field, database)
         self.assertIn('daily_cap = _normalize_plan_cap(payload.get("daily_cap_gb"), "Daily Cap")', api)
-        self.assertIn('monthly_cap = _normalize_plan_cap(payload.get("monthly_cap"), "Monthly Cap")', api)
+        self.assertIn('"monthly_cap": "Unlimited"', api)
         self.assertIn("/admin/plans", (root / "Backend/fastapi/main.py").read_text(encoding="utf-8"))
+
+    def test_monthly_caps_are_migrated_to_unlimited_once_per_process(self):
+        database = (Path(__file__).resolve().parents[1] / "Backend/helper/database.py").read_text(encoding="utf-8")
+        getter = database.split("async def get_subscription_plans", 1)[1].split("async def add_subscription_plan", 1)[0]
+        self.assertIn("self._monthly_cap_normalized", getter)
+        self.assertIn('collection.update_many(', getter)
+        self.assertIn('{"monthly_cap": {"$ne": "Unlimited"}}', getter)
+        self.assertIn('{"$set": {"monthly_cap": "Unlimited"}}', getter)
 
     def test_exclusivity_changes_invalidate_public_cache(self):
         database = (Path(__file__).resolve().parents[1] / "Backend/helper/database.py").read_text(encoding="utf-8")
@@ -299,14 +328,14 @@ class PublicSiteSafetyTests(unittest.TestCase):
         self.assertIsNone(project({"days": 0, "price": 10}))
         self.assertIsNone(project({"days": 30, "price": float("inf")}))
 
-    def test_public_plan_projection_uses_persisted_caps(self):
+    def test_public_plan_projection_uses_daily_cap_and_current_unlimited_monthly_policy(self):
         safe = NAMESPACE["_public_plan_record"]({
             "name": "Ultra", "days": 90, "price": 499, "currency": "INR",
             "daily_cap_gb": 100, "monthly_cap": 2500,
             "secret": "never expose",
         })
         self.assertEqual(safe["daily_cap_gb"], 100)
-        self.assertEqual(safe["monthly_cap"], 2500)
+        self.assertEqual(safe["monthly_cap"], "Unlimited")
         self.assertNotIn("secret", repr(safe))
 
     def test_public_library_endpoint_caches_final_page_payload_not_storage_candidates(self):
@@ -340,7 +369,7 @@ class PublicSiteSafetyTests(unittest.TestCase):
         plans = (SOURCE.parents[1] / "templates/public_plans.html").read_text(encoding="utf-8")
         self.assertIn("return await public_plans_page(request)", main)
         self.assertIn("plan.daily_cap_gb", plans)
-        self.assertIn("plan.monthly_cap", plans)
+        self.assertIn("Monthly usage: Unlimited (current offering)", plans)
         for phrase in ("customer reviews", "testimonials", "5-star reviews"):
             self.assertNotIn(phrase, plans.casefold())
 

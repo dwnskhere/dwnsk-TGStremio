@@ -67,6 +67,7 @@ class Database:
         self.dbs: Dict[str, motor.motor_asyncio.AsyncIOMotorDatabase] = {}
 
         self.current_db_index = 1
+        self._monthly_cap_normalized = False
 
     async def connect(self):
         try:
@@ -409,6 +410,15 @@ class Database:
     #-----
     async def get_subscription_plans(self) -> List[dict]:
         collection = self.dbs["tracking"]["sub_plans"]
+        # Monthly usage is currently unlimited for every offered plan. Keep the
+        # field in the schema for future releases, but normalize existing records
+        # once per process so legacy numeric caps do not contradict the current policy.
+        if not self._monthly_cap_normalized:
+            await collection.update_many(
+                {"monthly_cap": {"$ne": "Unlimited"}},
+                {"$set": {"monthly_cap": "Unlimited"}},
+            )
+            self._monthly_cap_normalized = True
         cursor = collection.find().sort("days", ASCENDING)
         plans = await cursor.to_list(None)
         # Idempotently backfill fields on plans created before public plan
@@ -444,7 +454,7 @@ class Database:
             "price": price,
             "currency": (currency or "INR").upper(),
             "daily_cap_gb": daily_cap_gb,
-            "monthly_cap": monthly_cap,
+            "monthly_cap": "Unlimited",
             "created_at": datetime.utcnow()
         })
         return str(result.inserted_id)
@@ -459,7 +469,7 @@ class Database:
                 {"$set": {
                     "name": name.strip(), "days": days, "price": price,
                     "currency": (currency or "INR").upper(),
-                    "daily_cap_gb": daily_cap_gb, "monthly_cap": monthly_cap,
+                    "daily_cap_gb": daily_cap_gb, "monthly_cap": "Unlimited",
                     "updated_at": datetime.utcnow()
                 }}
             )

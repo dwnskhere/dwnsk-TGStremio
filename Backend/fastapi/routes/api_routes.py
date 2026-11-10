@@ -719,11 +719,13 @@ def _plan_payload(payload: dict) -> dict:
     if not re.fullmatch(r"[A-Z]{3}", currency):
         raise HTTPException(status_code=400, detail="Currency must be a three-letter currency code")
     daily_cap = _normalize_plan_cap(payload.get("daily_cap_gb"), "Daily Cap")
-    monthly_cap = _normalize_plan_cap(payload.get("monthly_cap"), "Monthly Cap")
+    # Monthly data is unlimited for all plans in this release. The DB field
+    # remains present for a future entitlement update, but client input cannot
+    # accidentally advertise a finite cap.
     return {
         "name": name, "days": days, "price": price, "currency": currency,
         "daily_cap_gb": daily_cap,
-        "monthly_cap": "Unlimited" if monthly_cap is None else monthly_cap,
+        "monthly_cap": "Unlimited",
     }
 
 

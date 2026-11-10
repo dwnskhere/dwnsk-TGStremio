@@ -213,17 +213,14 @@ def _public_plan_record(plan: dict) -> dict | None:
     daily_cap = plan.get("daily_cap_gb", legacy_daily_caps.get(days))
     if daily_cap is None and "daily_cap_gb" not in plan:
         daily_cap = legacy_daily_caps.get(days)
-    monthly_cap = plan.get("monthly_cap", "Unlimited")
     if daily_cap is not None and str(daily_cap).strip().casefold() != "unlimited":
         daily_cap = _safe_number(daily_cap, default=-1)
         daily_cap = daily_cap if daily_cap >= 0 else None
     elif daily_cap is not None:
         daily_cap = "Unlimited"
-    if monthly_cap is None or str(monthly_cap).strip().casefold() in {"", "unlimited"}:
-        monthly_cap = "Unlimited"
-    else:
-        monthly_cap = _safe_number(monthly_cap, default=-1)
-        monthly_cap = monthly_cap if monthly_cap >= 0 else "Unlimited"
+    # Monthly usage is currently unlimited for every offered plan. Do not
+    # surface legacy numeric cap values before/without the DB migration.
+    monthly_cap = "Unlimited"
     return {
         "name": name,
         "days": days,
@@ -559,17 +556,31 @@ async def public_plans_page(request: Request):
         LOGGER.error(f"Public plans load failed: {exc}")
         plans = []
     clean_plans = [public_plan for plan in plans if (public_plan := _public_plan_record(plan))]
+    try:
+        # Statistics are aggregated only from the public-visible storage projection.
+        library_stats = await _public_stats()
+    except Exception as exc:
+        LOGGER.warning(f"Public collection statistics unavailable: {exc}")
+        library_stats = {"movies": 0, "tv_shows": 0, "episodes": 0}
     return templates.TemplateResponse("public_plans.html", {
         "request": request,
         "plans": clean_plans,
+        "library_stats": library_stats,
+        "terms_url": "https://t.me/CodecIndex/5",
+        "usage_policy_url": "https://t.me/CodecIndex/5",
         "faqs": [
-            ("How do I activate a plan?", "Choose a plan and continue to the configured Telegram activation bot. Follow the bot's instructions to complete the purchase and activation."),
-            ("What happens after I submit payment details?", "The payment is reviewed by the service team. Access is activated after successful verification."),
-            ("How do daily and monthly caps work?", "The limits shown on each plan are the limits configured by the administrator. Daily usage resets according to the service's configured reset schedule; monthly usage follows the plan's monthly cap."),
-            ("Can I share my access token?", "No. One access token is intended for one user. Keep your token private and do not resell or redistribute access."),
-            ("Which devices are supported?", "The service is intended for compatible Android devices, Android TV, Fire TV, desktop systems and supported media players. Compatibility depends on the device and player."),
-            ("What if I reach my daily limit?", "Streaming access may pause until the next daily reset, according to the selected plan's configured limits."),
-            ("How can I get help?", "Use the Support link configured by the administrator on this website."),
+            ("What is CodecIndex?", "CodecIndex is an unofficial managed hosting service for organizing and accessing Telegram media through its supported addon with compatible Nuvio and Stremio environments."),
+            ("How do I activate a plan?", "Open the configured Telegram activation bot, review the available plans and follow the purchase and activation instructions shown there."),
+            ("What happens after I submit payment details?", "Payment details may be reviewed by the service team. Access details are provided after the applicable verification process. Review timing can vary; no fixed activation time is guaranteed."),
+            ("Does CodecIndex work with Nuvio and Stremio?", "The addon is designed for supported Nuvio and Stremio environments. Compatibility depends on the player, platform and version; some features may vary."),
+            ("Do I need to manage my own server?", "CodecIndex provides managed hosting, so a personal VPS or Docker installation is not part of the normal setup."),
+            ("How do daily and monthly usage limits work?", "The daily cap is shown on each plan. Monthly usage is currently unlimited for the plans offered. Usage behaviour is subject to the service configuration and the plan active on your account."),
+            ("What happens if I reach my daily limit?", "The service may restrict further usage until the applicable reset, according to the active usage configuration. Check the activation bot or configured support contact for current details."),
+            ("Can I share my access token?", "No. One access token is intended for one user. Keep your token private; sharing, transferring or reselling access is not permitted."),
+            ("Are audio, subtitles and playback resume available?", "These options depend on the media source, player, platform and the features supported by the relevant playback setup."),
+            ("How are refunds handled?", "Refund requests can be raised through the configured support contact and may be reviewed under the applicable policy. Eligibility and outcomes depend on the review; a refund is not guaranteed."),
+            ("What if the service is temporarily unavailable?", "CodecIndex uses third-party infrastructure, so maintenance, provider or network issues may affect availability. No fixed restoration time or compensation outcome is promised."),
+            ("How can I get help?", "Use the Support contact configured by the service administrator on this website."),
         ],
         **_public_links(),
     })

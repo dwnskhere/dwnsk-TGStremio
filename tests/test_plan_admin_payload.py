@@ -42,13 +42,13 @@ class PlanAdminPayloadTests(unittest.TestCase):
             "daily_cap_gb": 50, "monthly_cap": "Unlimited",
         })
 
-    def test_zero_gb_monthly_cap_is_not_mistaken_for_unlimited(self):
+    def test_monthly_cap_is_forced_to_unlimited_for_current_release(self):
         payload = NAMESPACE["_plan_payload"]({
-            "name": "No Usage", "days": 30, "price": 0, "currency": "INR",
+            "name": "Current Plan", "days": 30, "price": 69, "currency": "INR",
             "daily_cap_gb": 0, "monthly_cap": 0,
         })
         self.assertEqual(payload["daily_cap_gb"], 0)
-        self.assertEqual(payload["monthly_cap"], 0)
+        self.assertEqual(payload["monthly_cap"], "Unlimited")
 
     def test_unlimited_and_decimal_caps_are_normalized(self):
         payload = NAMESPACE["_plan_payload"]({
@@ -56,6 +56,14 @@ class PlanAdminPayloadTests(unittest.TestCase):
             "daily_cap_gb": "12.5", "monthly_cap": "unlimited",
         })
         self.assertEqual(payload["daily_cap_gb"], 12.5)
+        self.assertEqual(payload["monthly_cap"], "Unlimited")
+
+
+    def test_finite_monthly_cap_input_is_ignored(self):
+        payload = NAMESPACE["_plan_payload"]({
+            "name": "Basic", "days": 90, "price": 179, "currency": "INR",
+            "daily_cap_gb": 70, "monthly_cap": "500",
+        })
         self.assertEqual(payload["monthly_cap"], "Unlimited")
 
     def test_invalid_plan_name_validity_price_currency_and_caps_are_rejected(self):
@@ -69,7 +77,6 @@ class PlanAdminPayloadTests(unittest.TestCase):
             {**base, "price": -1},
             {**base, "currency": "RUPEES"},
             {**base, "daily_cap_gb": -1},
-            {**base, "monthly_cap": -10},
         ]
         for item in invalid:
             with self.subTest(item=item):
