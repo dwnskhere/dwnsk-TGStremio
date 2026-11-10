@@ -64,6 +64,24 @@ def _finalize_title(title: str, metadata_info: dict) -> str:
     return finalize_media_name(title, bool(metadata_info.get('group_key')))
 
 
+def _attach_announcement_quality_context(metadata_info: dict, status: dict) -> None:
+    """Attach the pre-ingestion quality state so V2 announcement records can migrate safely."""
+    media_type = metadata_info.get("media_type")
+    if media_type == "movie":
+        metadata_info["_previous_qualities"] = status.get("announcement_previous_qualities", [])
+        return
+    if media_type == "tv":
+        season_number = metadata_info.get("season_number")
+        episode_number = metadata_info.get("episode_number")
+        episode_key = f"{season_number}:{episode_number}"
+        metadata_info["_previous_qualities"] = (
+            status.get("announcement_previous_episode_qualities") or {}
+        ).get(episode_key, [])
+        metadata_info["_previous_season_qualities"] = (
+            status.get("announcement_previous_season_qualities") or {}
+        ).get(str(season_number), [])
+
+
 #----- Serialize DB inserts from the queue and trigger catalog sync
 async def process_file():
     while True:
@@ -98,6 +116,7 @@ async def process_file():
                 ))
             except Exception as _strm_err:
                 LOGGER.debug(f"[STRM] Instant sync hook error: {_strm_err}")
+            _attach_announcement_quality_context(metadata_info, insert_status)
             announce_new_media(metadata_info)
             create_task(auto_fulfill(
                 tmdb_id=metadata_info.get("tmdb_id"),
@@ -195,10 +214,12 @@ async def _handle_personal_session(client: Client, message: Message) -> None:
         else:
             await apply_video_thumb_to_metadata(metadata_info, message, encoded, client)
 
+        insert_status: dict = {}
         async with db_lock:
             updated_id = await db.insert_media(
                 metadata_info, channel=p_channel, msg_id=p_msg,
                 size=resolved["size"], name=name, raw_size=int(resolved.get("raw_size") or 0),
+                status=insert_status,
             )
 
         if updated_id:
@@ -206,6 +227,11 @@ async def _handle_personal_session(client: Client, message: Message) -> None:
                      if media_type == "tv" else "")
             LOGGER.info(f"[Manual Session] Added {quality} {where}to '{metadata_info.get('title')}' (id {tmdb_id}).")
             create_task(stamp_caption_with_id(message, metadata_info))
+            # Personal sessions can add new qualities to an existing title too.
+            # Attach the pre-write quality snapshot and route through the same
+            # updater so a V2 announcement can notify on its first V3 quality add.
+            _attach_announcement_quality_context(metadata_info, insert_status)
+            announce_new_media(metadata_info)
         else:
             LOGGER.warning(f"[Manual Session] Insert failed for message {message.id}.")
 

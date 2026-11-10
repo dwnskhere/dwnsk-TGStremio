@@ -512,7 +512,7 @@ Automatically post a message whenever **new content is added**, so your members/
 **How to use:**
 1. In **Settings**, turn on **Announce New Content**.
 2. Set the **Announcement Channel** (ID or `@username`) and add your bot as admin there.
-3. From then on, every newly indexed movie/episode gets announced to that channel — each post includes one-tap **▶️ Stremio** and **📱 Nuvio** buttons that deep-link straight to that exact title (plus a **Get Addon** button). *(Deep-link buttons require your **Base URL** to be set.)*
+3. From then on, every newly indexed movie/episode gets announced to that channel — each post includes one-tap **▶️ Stremio** and **📱 Nuvio** buttons that deep-link straight to that exact title (plus a **Get Addon** button). When a new quality appears, a fresh replacement post is published first, then the previous announcement and tracked V3 alert copies are deleted. *(Deep-link buttons require your **Base URL** to be set.)*
 
 ## 🚑 Skip Channel
 
@@ -758,7 +758,7 @@ Connect a **Telegram User Session** (card above), then enable the toggle and add
 Each install link has a **Configure page** (`/stremio/{token}/configure`) where the user can set their **stream quality sort order**, **filter which qualities** appear, and **hide or reorder catalogs** for their own token — all without affecting anyone else.
 
 ### 📢 Announcements (optional)
-Turn on **Announce New Content** and set an **Announcement Channel** to auto-post whenever new media is indexed. See [Announcement Channel](#-announcement-channel).
+Turn on **Announce New Content** and set an **Announcement Channel** to auto-post whenever new media is indexed. When a new quality is added, the bot publishes a replacement announcement showing the complete quality list, saves its new message ID, and then removes the previous post and older V3 alert copies. See [Announcement Channel](#-announcement-channel).
 
 ### 📁 Manual Channel
 Set the channel used for **hand-added / personal files** (these are *not* auto-indexed). Used by the [Manual Upload Session](#️-adding-files-manually-goa-trip-lectures-one-piece).
