@@ -1,0 +1,23 @@
+{% extends "public_base.html" %}
+{% block title %}Plans — CodecIndex{% endblock %}
+{% block content %}
+<section>
+  <p class="eyebrow" style="text-align:center">CODECINDEX · MEMBERSHIP</p>
+  <div class="plans-intro"><h1 class="page-title" style="font-size:clamp(37px,5vw,62px)">Choose your <em>plan</em></h1><p>Pick a duration that works for you. Plan duration, price and currency are loaded directly from your subscription database.</p></div>
+  {% if plans %}<div class="plans-grid">
+    {% for plan in plans %}<article class="plan-card">
+      <div class="plan-name">{{ plan.name }}</div><div class="plan-days">{{ plan.days }} days of access</div>
+      <div class="plan-price">{% if plan.currency == 'INR' %}₹{% elif plan.currency == 'USD' %}${% elif plan.currency == 'EUR' %}€{% elif plan.currency == 'GBP' %}£{% elif plan.currency == 'AED' %}د.إ{% else %}{{ plan.currency }} {% endif %}{{ '%.2f'|format(plan.price) if plan.price % 1 else '%.0f'|format(plan.price) }}</div>
+      <div class="plan-currency">{{ plan.currency }} · VALID FOR {{ plan.days }} DAYS</div>
+      <ul class="plan-points">
+        <li>Movies and TV series library access</li>
+        {% if plan.daily_limit_gb %}<li>Daily usage allowance: {{ plan.daily_limit_gb }} GB</li>{% endif %}
+        <li>Unlimited monthly data, subject to daily usage cap</li>
+        <li>Direct streaming on supported compatible devices</li>
+      </ul>
+      {% if purchase_url %}<a class="btn btn-gold" href="{{ purchase_url }}" target="_blank" rel="noopener noreferrer">Get {{ plan.name }} ↗</a>{% else %}<span class="btn" style="opacity:.6;text-align:center">Purchase bot not configured</span>{% endif %}
+    </article>{% endfor %}
+  </div>
+  {% else %}<div class="empty-state">Subscription plans are not available right now. Please check back later.</div>{% endif %}
+</section>
+{% endblock %}

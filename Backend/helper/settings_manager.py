@@ -25,6 +25,8 @@ _DEFAULTS: Dict[str, Any] = {
     "subscription": False,
     "subscription_group_id": 0,
     "approver_ids": [],
+    "public_bot_username": "",
+    "public_support_contact": "",
     "payment_instructions": "",
     "payment_qr_url": "",
     "http_proxy_url": "",

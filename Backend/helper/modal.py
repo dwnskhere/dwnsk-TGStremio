@@ -28,6 +28,9 @@ class Episode(BaseModel):
     overview: Optional[str] = None
     released: Optional[str] = None
     absolute_episode: Optional[int] = None
+    # Set only when an episode is first indexed. Subsequent quality additions
+    # do not refresh this value, keeping the public "New episodes" filter honest.
+    indexed_on: Optional[datetime] = None
     telegram: Optional[List[QualityDetail]]
 
 

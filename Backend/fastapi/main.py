@@ -122,6 +122,7 @@ from Backend.fastapi.routes.cf_routes import router as cf_router
 from Backend.fastapi.routes.stremio_routes import router as stremio_router
 from Backend.fastapi.routes.webdav_routes import router as webdav_router
 from Backend.fastapi.routes.strm_routes import router as strm_router
+from Backend.fastapi.routes.public_site import router as public_site_router
 from Backend.fastapi.routes.template_routes import (
     admin_access_page,
     admin_dashboard_page,
@@ -149,6 +150,8 @@ app = FastAPI(
     description="A powerful, self-hosted Telegram Stremio Media Server built with FastAPI, MongoDB, and PyroFork seamlessly integrated with Stremio for automated media streaming and discovery.",
     version=__version__
 )
+
+app.include_router(public_site_router)
 
 #----- Middleware
 app.add_middleware(
@@ -299,9 +302,15 @@ async def open_in_app(app_name: str, media_type: str, content_id: str):
     return HTMLResponse(html)
 
 
-#----- Protected routes (authentication required)
+#----- Public landing page
 @app.get("/", response_class=HTMLResponse)
-async def root(request: Request, _: bool = Depends(require_auth)):
+async def root(request: Request):
+    from Backend.fastapi.routes.public_site import public_library_page
+    return await public_library_page(request)
+
+#----- Protected routes (authentication required)
+@app.get("/admin", response_class=HTMLResponse)
+async def admin_home(request: Request, _: bool = Depends(require_auth)):
     return await dashboard_page(request, _)
 
 @app.get("/admin/dashboard", response_class=HTMLResponse)

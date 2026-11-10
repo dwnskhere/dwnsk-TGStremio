@@ -3,6 +3,7 @@ import asyncio
 import json
 import os
 import random
+import re
 import secrets
 import shutil
 from datetime import datetime
@@ -1952,12 +1953,29 @@ async def update_settings_api(payload: dict) -> dict:
                         detail=f"Channel {', '.join(sorted(clash))} can't be in both {a} and {b} channels — each channel may only belong to one field."
                     )
 
+    def _validate_public_telegram_target(value: str, field: str, allow_url: bool = True) -> str:
+        value = str(value or "").strip()
+        if not value:
+            return ""
+        username = value.removeprefix("@").strip()
+        if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{4,31}", username):
+            return username
+        if allow_url and re.fullmatch(r"https://(?:t\.me|telegram\.me)/[A-Za-z][A-Za-z0-9_]{4,31}/?", value, re.I):
+            return value.rstrip("/")
+        raise HTTPException(status_code=400, detail=f"Invalid {field}. Use a Telegram @username or https://t.me/username.")
+
+    if "public_bot_username" in payload:
+        payload["public_bot_username"] = _validate_public_telegram_target(payload["public_bot_username"], "purchase bot", allow_url=False)
+    if "public_support_contact" in payload:
+        payload["public_support_contact"] = _validate_public_telegram_target(payload["public_support_contact"], "support contact")
+
     #----- Strip whitespace from string fields
     for key in ("tmdb_api", "base_url", "upstream_repo", "upstream_branch",
                 "admin_username", "admin_password", "session_secret", "http_proxy_url",
                 "cf_stream_url", "cf_stream_secret", "cf_stream_mode",
                 "mediaflow_password", "payment_instructions", "payment_qr_url",
-                "announcement_channel", "skip_channel"):
+                "announcement_channel", "skip_channel", "public_bot_username",
+                "public_support_contact"):
         if key in payload and isinstance(payload[key], str):
             payload[key] = payload[key].strip()
 

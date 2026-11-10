@@ -1654,6 +1654,10 @@ class Database:
             if status is not None:
                 status["announcement_previous_episode_qualities"] = {}
                 status["announcement_previous_season_qualities"] = {}
+            indexed_now = datetime.utcnow()
+            for incoming_season in tv_show_dict.get("seasons") or []:
+                for incoming_episode in incoming_season.get("episodes") or []:
+                    incoming_episode["indexed_on"] = incoming_episode.get("indexed_on") or indexed_now
             try:
                 tv_show_dict["db_index"] = self.current_db_index
                 result = await self.dbs[current_db_key]["tv"].insert_one(tv_show_dict)
@@ -1729,6 +1733,9 @@ class Database:
             )
 
             if not existing_season:
+                indexed_now = datetime.utcnow()
+                for incoming_episode in season.get("episodes") or []:
+                    incoming_episode["indexed_on"] = incoming_episode.get("indexed_on") or indexed_now
                 existing_tv["seasons"].append(season)
                 continue
 
@@ -1748,6 +1755,7 @@ class Database:
                     )
 
                 if not existing_episode:
+                    episode["indexed_on"] = episode.get("indexed_on") or datetime.utcnow()
                     existing_season["episodes"].append(episode)
                     continue
 

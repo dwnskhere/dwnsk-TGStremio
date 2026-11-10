@@ -664,6 +664,22 @@
 
 
 
+<!-- ── Public Website ─────────────────────────────────────────────── -->
+<div class="settings-card">
+    <h2><i class="fa-solid fa-globe"></i> Public Website</h2>
+    <p class="bk-desc">Configure the Telegram destinations shown on the public Library and Plans pages. These values are public, so only enter usernames or links intended for visitors.</p>
+    <div style="margin-bottom:1rem">
+        <label class="s-label" for="public_bot_username">Purchase / Activation Bot</label>
+        <input type="text" id="public_bot_username" class="s-input" value="{{ settings.public_bot_username }}" placeholder="@YourBotUsername">
+        <span style="color:var(--text-sec);font-size:0.78rem;display:block;margin-top:0.4rem">Plan buttons open this bot. Leave empty to use the currently connected StreamBot username.</span>
+    </div>
+    <div>
+        <label class="s-label" for="public_support_contact">Support Telegram Username or Link</label>
+        <input type="text" id="public_support_contact" class="s-input" value="{{ settings.public_support_contact }}" placeholder="@SupportUsername or https://t.me/SupportUsername">
+        <span style="color:var(--text-sec);font-size:0.78rem;display:block;margin-top:0.4rem">The Support link is hidden from visitors until a valid username or Telegram link is saved.</span>
+    </div>
+</div>
+
 <!-- ── Telegram User Session ──────────────────────────────────────── -->
 <div class="settings-card">
     <h2><i class="fa-solid fa-user-lock"></i> Telegram User Session</h2>
@@ -1815,6 +1831,8 @@ async function saveSettings() {
         payment_instructions:          document.getElementById('payment_instructions').value.trim(),
         payment_qr_url:                document.getElementById('payment_qr_url').value.trim(),
         approver_ids:                  collectList('approver_ids').map(Number),
+        public_bot_username:           document.getElementById('public_bot_username').value.trim(),
+        public_support_contact:        document.getElementById('public_support_contact').value.trim(),
         http_proxy_url:                document.getElementById('http_proxy_url').value.trim(),
         show_proxy_and_non_proxy_both: document.getElementById('show_proxy_and_non_proxy_both').checked,
         mediaflow_proxy:               document.getElementById('mediaflow_proxy').checked,
@@ -1979,6 +1997,8 @@ function renderSettings(s) {
     document.getElementById('upstream_repo').value = s.upstream_repo || '';
     document.getElementById('upstream_branch').value = s.upstream_branch || '';
     document.getElementById('subscription_group_id').value = s.subscription_group_id || 0;
+    document.getElementById('public_bot_username').value = s.public_bot_username || '';
+    document.getElementById('public_support_contact').value = s.public_support_contact || '';
     document.getElementById('http_proxy_url').value = s.http_proxy_url || '';
     document.getElementById('mediaflow_proxy').checked = !!s.mediaflow_proxy;
     document.getElementById('mediaflow_password').value = s.mediaflow_password || '';
