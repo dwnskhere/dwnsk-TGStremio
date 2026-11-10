@@ -9,9 +9,12 @@ from __future__ import annotations
 
 import asyncio
 import html
+import json
 import re
+from urllib.parse import quote
 import time
 from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 from typing import Any
 
 import httpx
@@ -29,11 +32,14 @@ from Backend.pyrofork.bot import StreamBot, get_streambot_url
 
 
 _BOT_API_BASE = "https://api.telegram.org/bot{}"
+_TELEGRAPH_API_BASE = "https://api.telegra.ph"
+_TELEGRAPH_ACCOUNT_LOCK = asyncio.Lock()
 _SEASON_CACHE_TTL = 60 * 60
 _SEASON_NEGATIVE_CACHE_TTL = 5 * 60
 _IMAGE_CACHE_TTL = 6 * 60 * 60
 _RECONCILE_INTERVAL_SECONDS = 60 * 60
 _SEASON_METADATA_CACHE: dict[tuple[int, int], tuple[float, dict | None]] = {}
+_SEASON_PROGRESS_CACHE: dict[tuple[int, int], tuple[float, dict | None]] = {}
 _TMDB_IMAGE_CACHE: dict[tuple, tuple[float, dict]] = {}
 _ANNOUNCEMENT_LOCKS: dict[str, asyncio.Lock] = {}
 _ANNOUNCEMENT_RECONCILER_TASK: asyncio.Task | None = None
@@ -1050,11 +1056,137 @@ async def _publish_or_update(key: str, chat, info: dict, season_metadata: dict |
         )
 
 
-async def _get_tmdb_season_metadata(tmdb_id, season_number: int) -> dict | None:
-    """Return a season's complete, already-aired TMDb episode list.
+async def _get_tmdb_season_progress(tmdb_id, season_number: int) -> dict | None:
+    """Return complete TMDb episode metadata split into aired and not-yet-aired.
 
-    Consolidation is deliberately conservative: missing API keys, incomplete
-    metadata, missing air dates, and future-dated episodes all prevent it.
+    A complete metadata response is required before issuing missing-episode
+    alerts. Episodes without a valid air date are deliberately not classified
+    as aired, preventing false alerts for upcoming or not-yet-scheduled episodes.
+    """
+    tmdb_id_int = _as_int(tmdb_id)
+    if not tmdb_id_int or season_number <= 0:
+        return None
+
+    cache_key = (tmdb_id_int, season_number)
+    cached = _SEASON_PROGRESS_CACHE.get(cache_key)
+    if cached:
+        cache_age = time.monotonic() - cached[0]
+        cache_ttl = _SEASON_NEGATIVE_CACHE_TTL if cached[1] is None else _SEASON_CACHE_TTL
+        if cache_age < cache_ttl:
+            return cached[1]
+
+    api_key = tmdb_provider.tmdb_api_key()
+    if not api_key:
+        LOGGER.warning("Season episode checks are waiting: TMDb API key is not configured.")
+        _SEASON_PROGRESS_CACHE[cache_key] = (time.monotonic(), None)
+        return None
+
+    base = "https://api.themoviedb.org/3"
+    try:
+        async with tmdb_provider.API_SEMAPHORE:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=8.0)) as client:
+                show_response, season_response = await asyncio.gather(
+                    client.get(
+                        f"{base}/tv/{tmdb_id_int}",
+                        params={"api_key": api_key, "language": "en-US"},
+                    ),
+                    client.get(
+                        f"{base}/tv/{tmdb_id_int}/season/{season_number}",
+                        params={"api_key": api_key, "language": "en-US"},
+                    ),
+                )
+
+        if show_response.status_code != 200 or season_response.status_code != 200:
+            LOGGER.debug(
+                f"TMDb season metadata unavailable for tv={tmdb_id_int} season={season_number}: "
+                f"show={show_response.status_code}, season={season_response.status_code}"
+            )
+            _SEASON_PROGRESS_CACHE[cache_key] = (time.monotonic(), None)
+            return None
+
+        show_data = show_response.json()
+        season_data = season_response.json()
+        season_summary = next((
+            item for item in (show_data.get("seasons") or [])
+            if _as_int(item.get("season_number"), -1) == season_number
+        ), None)
+        expected_count = _as_int((season_summary or {}).get("episode_count"), 0)
+        metadata_episodes = season_data.get("episodes") or []
+        if expected_count <= 0:
+            expected_count = len(metadata_episodes)
+
+        # Never alert from a partial TMDb response: it could omit an aired EP.
+        if not metadata_episodes or (expected_count > 0 and len(metadata_episodes) < expected_count):
+            LOGGER.debug(
+                f"TMDb season metadata incomplete for tv={tmdb_id_int} S{season_number:02d}: "
+                f"returned {len(metadata_episodes)}/{expected_count} episode records"
+            )
+            _SEASON_PROGRESS_CACHE[cache_key] = (time.monotonic(), None)
+            return None
+
+        # The application logs use IST; compare date-only TMDb air dates against
+        # the same local calendar date so an episode airing today is not future.
+        try:
+            today = datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Kolkata")).date()
+        except Exception:
+            today = date.today()
+        aired_episodes: dict[int, dict] = {}
+        has_unreleased_or_unknown_regular_episode = False
+        for episode in metadata_episodes:
+            number = _as_int(episode.get("episode_number"), 0)
+            episode_type = str(episode.get("episode_type") or "standard").lower()
+            if number <= 0 or number >= 1000 or episode_type == "special":
+                continue
+
+            air_date = str(episode.get("air_date") or "").strip()
+            if not air_date:
+                has_unreleased_or_unknown_regular_episode = True
+                continue
+            try:
+                parsed_date = date.fromisoformat(air_date[:10])
+            except ValueError:
+                LOGGER.debug(
+                    f"TMDb season metadata has invalid air_date={air_date!r} "
+                    f"for tv={tmdb_id_int} S{season_number:02d}E{number:02d}"
+                )
+                has_unreleased_or_unknown_regular_episode = True
+                continue
+
+            # TMDb supplies a date but not a reliable per-episode release time.
+            # Treat today's date as not-yet-confirmed so an upcoming episode
+            # scheduled later today is never included in a missing alert.
+            if parsed_date >= today:
+                has_unreleased_or_unknown_regular_episode = True
+                continue
+            aired_episodes[number] = episode
+
+        result = {
+            "aired_episodes": aired_episodes,
+            "episode_numbers": set(aired_episodes),
+            "all_regular_episodes_aired": not has_unreleased_or_unknown_regular_episode,
+            "season_name": str(season_data.get("name") or f"Season {season_number}"),
+            "series_name": str(show_data.get("name") or show_data.get("original_name") or ""),
+            "year": str(show_data.get("first_air_date") or "")[:4],
+            "season_overview": str(season_data.get("overview") or ""),
+            "poster_path": str(season_data.get("poster_path") or ""),
+            "expected_count": expected_count,
+        }
+        _SEASON_PROGRESS_CACHE[cache_key] = (time.monotonic(), result)
+        return result
+    except Exception as e:
+        LOGGER.warning(
+            f"TMDb season metadata check failed for tv={tmdb_id_int} "
+            f"season={season_number} ({type(e).__name__})."
+        )
+        _SEASON_PROGRESS_CACHE[cache_key] = (time.monotonic(), None)
+        return None
+
+
+async def _get_tmdb_season_metadata(tmdb_id, season_number: int) -> dict | None:
+    """Return a season checklist only after every regular episode has aired.
+
+    Consolidation remains conservative. The separate progress helper can still
+    identify already-aired missing episodes while a season has future dates.
     """
     tmdb_id_int = _as_int(tmdb_id)
     if not tmdb_id_int or season_number <= 0:
@@ -1068,61 +1200,530 @@ async def _get_tmdb_season_metadata(tmdb_id, season_number: int) -> dict | None:
         if cache_age < cache_ttl:
             return cached[1]
 
-    api_key = tmdb_provider.tmdb_api_key()
-    if not api_key:
-        LOGGER.warning("Season consolidation is waiting: TMDb API key is not configured.")
+    progress = await _get_tmdb_season_progress(tmdb_id_int, season_number)
+    if not progress or not progress.get("all_regular_episodes_aired"):
         _SEASON_METADATA_CACHE[cache_key] = (time.monotonic(), None)
         return None
 
-    base = "https://api.themoviedb.org/3"
+    episode_numbers = progress.get("episode_numbers") or set()
+    if not episode_numbers:
+        _SEASON_METADATA_CACHE[cache_key] = (time.monotonic(), None)
+        return None
+
+    result = {
+        "episode_numbers": set(episode_numbers),
+        "season_name": progress.get("season_name") or f"Season {season_number}",
+        "season_overview": progress.get("season_overview") or "",
+        "poster_path": progress.get("poster_path") or "",
+        "expected_count": progress.get("expected_count") or len(episode_numbers),
+    }
+    _SEASON_METADATA_CACHE[cache_key] = (time.monotonic(), result)
+    return result
+
+
+def _missing_episode_approver_ids() -> list[int]:
+    """Resolve recipients strictly from the configured subscription approvers."""
     try:
-        async with tmdb_provider.API_SEMAPHORE:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=8.0)) as client:
-                show_response, season_response = await asyncio.gather(
-                    client.get(f"{base}/tv/{tmdb_id_int}", params={"api_key": api_key, "language": "en-US"}),
-                    client.get(f"{base}/tv/{tmdb_id_int}/season/{season_number}", params={"api_key": api_key, "language": "en-US"}),
-                )
-        if show_response.status_code != 200 or season_response.status_code != 200:
-            LOGGER.debug(
-                f"TMDb season metadata unavailable for tv={tmdb_id_int} season={season_number}: "
-                f"show={show_response.status_code}, season={season_response.status_code}"
+        recipients = list(SettingsManager.current().approver_ids or Telegram.APPROVER_IDS or [])
+    except Exception:
+        recipients = list(Telegram.APPROVER_IDS or [])
+
+    result = []
+    seen = set()
+    for value in recipients:
+        user_id = _as_int(value, 0)
+        if user_id > 0 and user_id not in seen:
+            seen.add(user_id)
+            result.append(user_id)
+    return result
+
+
+def _quality_tiers_present(qualities) -> set[str]:
+    """Map raw stream labels to independent audit tiers.
+
+    480p is its own tier. 540p is accepted as a substitute only for the 720p
+    tier. 1080p and any higher recognised resolution satisfy the 1080p tier.
+    Higher tiers never satisfy lower tiers.
+    """
+    present: set[str] = set()
+    for raw in qualities or []:
+        label = str(raw or "").strip().lower()
+        if not label:
+            continue
+        if re.search(r"(?<!\d)8\s*k(?!\w)", label):
+            present.add("1080p")
+            continue
+        if re.search(r"(?<!\d)4\s*k(?!\w)", label):
+            present.add("1080p")
+            continue
+        match = re.search(r"(?<!\d)(\d{3,4})\s*p?\b", label)
+        if not match:
+            continue
+        resolution = int(match.group(1))
+        if resolution == 480:
+            present.add("480p")
+        elif resolution in (540, 720):
+            present.add("720p")
+        elif resolution >= 1080:
+            present.add("1080p")
+    return present
+
+
+def _build_season_quality_audit(season: dict, aired_episode_numbers: set[int]) -> dict:
+    """Return missing episodes and independent quality gaps for aired episodes."""
+    expected = {_as_int(number, 0) for number in aired_episode_numbers if _as_int(number, 0) > 0}
+    episode_by_number = {
+        _as_int(item.get("episode_number"), 0): item
+        for item in (season or {}).get("episodes") or []
+        if _as_int(item.get("episode_number"), 0) > 0
+    }
+    completely_missing: set[int] = set()
+    quality_gaps: dict[int, dict] = {}
+    indexed_count = 0
+
+    for number in sorted(expected):
+        episode = episode_by_number.get(number) or {}
+        live_streams = [
+            stream for stream in (episode.get("telegram") or [])
+            if isinstance(stream, dict) and not stream.get("is_dead")
+        ]
+        if not live_streams:
+            completely_missing.add(number)
+            continue
+
+        indexed_count += 1
+        available = sorted({
+            str(stream.get("quality") or "").strip()
+            for stream in live_streams
+            if str(stream.get("quality") or "").strip()
+        }, key=_quality_sort_key)
+        present_tiers = _quality_tiers_present(available)
+        missing_tiers = [
+            tier for tier in ("480p", "720p", "1080p")
+            if tier not in present_tiers
+        ]
+        if missing_tiers:
+            quality_gaps[number] = {
+                "available_qualities": available,
+                "missing_tiers": missing_tiers,
+            }
+
+    return {
+        "missing_episode_numbers": completely_missing,
+        "indexed_count": indexed_count,
+        "quality_gaps": quality_gaps,
+    }
+
+
+def _build_missing_episode_telegraph_content(
+    info: dict,
+    season_number: int,
+    progress: dict,
+    missing_numbers: list[int],
+    quality_gaps: dict[int, dict],
+    indexed_count: int,
+) -> list[dict]:
+    """Build a Telegraph-compatible rich document for one season audit.
+
+    Telegraph's supported NodeElement tags do not include HTML tables. Use
+    consistent episode sections with bold labels instead of emitting an
+    unsupported <table> element that Telegraph would reject or strip.
+    """
+    tmdb_id = _as_int(info.get("tmdb_id"), 0)
+    title = str(info.get("title") or progress.get("series_name") or "Unknown TV Show").strip()
+    year = _as_int(info.get("year"), _as_int(progress.get("year"), 0))
+    title_year = f"{title} ({year})" if year else title
+    aired_episodes = progress.get("aired_episodes") or {}
+    missing_set = {_as_int(number, 0) for number in missing_numbers}
+    gap_numbers = {_as_int(number, 0) for number in quality_gaps}
+    issue_numbers = sorted(number for number in missing_set | gap_numbers if number > 0)
+    aired_count = len(progress.get("episode_numbers") or [])
+    total_quality_gaps = sum(len(gap.get("missing_tiers") or []) for gap in quality_gaps.values())
+
+    nodes: list[dict] = [
+        {"tag": "h3", "children": ["⚠️ Missing Episodes & Quality Audit"]},
+        {"tag": "p", "children": [
+            {"tag": "strong", "children": [f"📺 {title_year}"]},
+            " · ",
+            {"tag": "a", "attrs": {"href": f"https://www.themoviedb.org/tv/{tmdb_id}"},
+             "children": [f"TMDb ID: {tmdb_id}"]},
+        ]},
+        {"tag": "h4", "children": [f"Season {season_number:02d} — Episode & Quality Audit"]},
+        {"tag": "p", "children": [
+            {"tag": "strong", "children": ["📦 Season coverage: "]},
+            f"{indexed_count}/{aired_count} aired episodes indexed · ",
+            f"{len(missing_set)} completely missing · ",
+            f"{len(quality_gaps)} with quality gaps · {total_quality_gaps} missing quality tiers",
+        ]},
+        {"tag": "hr"},
+    ]
+
+    if not issue_numbers:
+        nodes.extend([
+            {"tag": "h4", "children": ["✅ All audited episodes are complete"]},
+            {"tag": "p", "children": [
+                "Every aired regular episode is indexed and has all three required quality tiers."
+            ]},
+        ])
+    else:
+        for number in issue_numbers:
+            episode = aired_episodes.get(number) or {}
+            episode_title = str(episode.get("name") or "Untitled episode").strip()
+            code = f"S{season_number:02d}E{number:02d}"
+            if number in missing_set:
+                available_text = "No active streams"
+                missing_text = "ALL MISSING"
+                marker = "🔴"
+            else:
+                gap = quality_gaps[number]
+                available_text = " | ".join(gap.get("available_qualities") or []) or "Unclassified"
+                missing_text = " | ".join(gap.get("missing_tiers") or [])
+                marker = "🟠"
+            nodes.extend([
+                {"tag": "h4", "children": [f"{marker} {code} — {episode_title}"]},
+                {"tag": "p", "children": [
+                    {"tag": "strong", "children": ["Available: "]},
+                    available_text,
+                    {"tag": "br"},
+                    {"tag": "strong", "children": ["Missing: "]},
+                    missing_text,
+                ]},
+                {"tag": "hr"},
+            ])
+
+    nodes.extend([
+        {"tag": "h4", "children": ["Quality audit rules"]},
+        {"tag": "ul", "children": [
+            {"tag": "li", "children": ["480p is an independent required tier."]},
+            {"tag": "li", "children": ["720p is satisfied by 720p or 540p."]},
+            {"tag": "li", "children": ["1080p is satisfied by 1080p, 1440p, 2160p, 4K, 8K or higher."]},
+            {"tag": "li", "children": ["Higher tiers do not replace the lower required tiers."]},
+            {"tag": "li", "children": ["Dead streams are excluded from the audit."]},
+        ]},
+        {"tag": "blockquote", "children": [
+            "Only regular episodes with an air date before today's IST date are included. "
+            "Episodes dated today or in the future, specials, and episodes without a valid air date are excluded."
+        ]},
+    ])
+    return nodes
+
+
+class _TelegraphAPIError(RuntimeError):
+    def __init__(self, method: str, error: str):
+        self.method = method
+        self.error = str(error or "Unknown Telegraph API error")
+        super().__init__(f"Telegraph API {method} failed: {self.error}")
+
+
+async def _telegraph_api_request(method: str, payload: dict) -> dict:
+    """Call the official Telegraph API using its form-encoded POST interface."""
+    url = f"{_TELEGRAPH_API_BASE}/{method}"
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
+        response = await client.post(url, data=payload)
+    try:
+        body = response.json()
+    except ValueError:
+        body = {}
+    if not isinstance(body, dict) or not body.get("ok"):
+        raise _TelegraphAPIError(method, (body or {}).get("error") or response.text)
+    result = body.get("result")
+    if not isinstance(result, dict):
+        raise _TelegraphAPIError(method, "API returned an invalid result")
+    return result
+
+
+async def _get_telegraph_access_token() -> str:
+    """Get or lazily provision the app's Telegraph account token in MongoDB."""
+    collection = db.dbs["tracking"]["telegraph_accounts"]
+    record_id = "season_quality_audit"
+    record = await collection.find_one({"_id": record_id})
+    token = str((record or {}).get("access_token") or "").strip()
+    if token:
+        return token
+
+    async with _TELEGRAPH_ACCOUNT_LOCK:
+        record = await collection.find_one({"_id": record_id})
+        token = str((record or {}).get("access_token") or "").strip()
+        if token:
+            return token
+
+        account = await _telegraph_api_request("createAccount", {
+            "short_name": "TGStremioAudit",
+            "author_name": "Telegram-Stremio",
+        })
+        token = str(account.get("access_token") or "").strip()
+        if not token:
+            raise _TelegraphAPIError("createAccount", "No access_token was returned")
+        await collection.update_one(
+            {"_id": record_id},
+            {"$set": {
+                "access_token": token,
+                "short_name": "TGStremioAudit",
+                "created_at": datetime.now(timezone.utc).replace(tzinfo=None),
+            }},
+            upsert=True,
+        )
+        return token
+
+
+async def _create_or_update_telegraph_audit_page(
+    tmdb_id: int,
+    season_number: int,
+    title: str,
+    content: list[dict],
+    has_issues: bool | None = None,
+) -> dict:
+    """Publish or update one stable Telegraph page per TV show/season."""
+    token = await _get_telegraph_access_token()
+    pages = db.dbs["tracking"]["season_missing_episode_telegraph_pages"]
+    page_id = f"tv:{tmdb_id}:season:{season_number:02d}"
+    old_page = await pages.find_one({"_id": page_id})
+    page_title = f"{title} — Season {season_number:02d} Episode & Quality Audit"[:256]
+    content_json = json.dumps(content, ensure_ascii=False, separators=(",", ":"))
+    if len(content_json.encode("utf-8")) > 64 * 1024:
+        raise _TelegraphAPIError("createPage/editPage", "Audit page content exceeds Telegraph's 64 KB limit")
+
+    page = None
+    old_path = str((old_page or {}).get("path") or "").strip()
+    if old_path:
+        try:
+            page = await _telegraph_api_request(
+                f"editPage/{quote(old_path, safe='')}",
+                {
+                    "access_token": token,
+                    "title": page_title,
+                    "content": content_json,
+                    "author_name": "Telegram-Stremio",
+                    "return_content": "false",
+                },
             )
-            return None
-        show_data = show_response.json()
-        season_data = season_response.json()
-        season_summary = next((
-            item for item in (show_data.get("seasons") or [])
-            if _as_int(item.get("season_number"), -1) == season_number
-        ), None)
-        expected_count = _as_int((season_summary or {}).get("episode_count"), 0)
-        metadata_episodes = season_data.get("episodes") or []
-        if expected_count <= 0 and metadata_episodes:
-            # Some TMDb responses omit episode_count from the series season
-            # summary while still returning the full season episode list.
-            expected_count = len(metadata_episodes)
+        except _TelegraphAPIError as error:
+            if error.error not in {"PAGE_NOT_FOUND", "PAGE_NOT_EDITABLE"}:
+                raise
+            LOGGER.warning(
+                f"Stored Telegraph audit page is no longer editable for {page_id}; creating a new page."
+            )
 
-        # The metadata list must be complete and every regular episode must
-        # have aired before it can be used as the consolidation checklist.
-        episode_numbers = _released_regular_episode_numbers(metadata_episodes, expected_count)
-        if not episode_numbers:
-            _SEASON_METADATA_CACHE[cache_key] = (time.monotonic(), None)
-            return None
+    if page is None:
+        page = await _telegraph_api_request("createPage", {
+            "access_token": token,
+            "title": page_title,
+            "content": content_json,
+            "author_name": "Telegram-Stremio",
+            "return_content": "false",
+        })
 
-        result = {
-            "episode_numbers": episode_numbers,
-            "season_name": str(season_data.get("name") or f"Season {season_number}"),
-            "season_overview": str(season_data.get("overview") or ""),
-            "poster_path": str(season_data.get("poster_path") or ""),
-            "expected_count": expected_count,
+    page_url = str(page.get("url") or "").strip()
+    page_path = str(page.get("path") or "").strip()
+    if not page_url or not page_path:
+        raise _TelegraphAPIError("createPage/editPage", "Page URL or path missing from response")
+
+    await pages.update_one(
+        {"_id": page_id},
+        {"$set": {
+            "tmdb_id": tmdb_id,
+            "season_number": season_number,
+            "title": page_title,
+            "url": page_url,
+            "path": page_path,
+            "has_open_issues": has_issues if has_issues is not None else bool((old_page or {}).get("has_open_issues", True)),
+            "updated_at": datetime.now(timezone.utc).replace(tzinfo=None),
+        }},
+        upsert=True,
+    )
+    return {"url": page_url, "path": page_path, "title": page_title}
+
+
+async def _notify_approvers_missing_episodes(
+    info: dict,
+    season_number: int,
+    progress: dict,
+    missing_numbers: set[int],
+    indexed_count: int,
+    quality_gaps: dict[int, dict] | None = None,
+) -> None:
+    """Send compact Telegram notices linking to a rich Telegraph audit page.
+
+    The Telegraph page is shared and updated in place for each show/season.
+    Per-approver deduplication continues to track the episode and quality state.
+    """
+    tmdb_id = _as_int(info.get("tmdb_id"), 0)
+    if not tmdb_id:
+        return
+
+    recipients = _missing_episode_approver_ids()
+    if not recipients:
+        LOGGER.debug(
+            f"Missing-episode alert skipped for tv={tmdb_id} S{season_number:02d}: "
+            "APPROVER_IDS is empty."
+        )
+        return
+
+    sorted_missing = sorted(
+        _as_int(number, 0) for number in missing_numbers if _as_int(number, 0) > 0
+    )
+    quality_gaps = quality_gaps or {}
+    quality_state = [
+        {
+            "episode_number": int(number),
+            "available_qualities": list(gap.get("available_qualities") or []),
+            "missing_tiers": list(gap.get("missing_tiers") or []),
         }
-        _SEASON_METADATA_CACHE[cache_key] = (time.monotonic(), result)
-        return result
+        for number, gap in sorted(quality_gaps.items(), key=lambda item: int(item[0]))
+    ]
+    missing_state = sorted_missing
+    has_issues = bool(missing_state or quality_state)
+    record_key = f"tv:{tmdb_id}:season:{season_number:02d}"
+    alert_collection = db.dbs["tracking"]["season_missing_episode_alerts"]
+    title = str(info.get("title") or progress.get("series_name") or "Unknown TV Show").strip()
+    year = _as_int(info.get("year"), _as_int(progress.get("year"), 0))
+    title_year = f"{title} ({year})" if year else title
+    alert_format_version = 3
+    changed_recipients: list[tuple[int, str]] = []
+
+    for user_id in recipients:
+        alert_id = f"{record_key}:approver:{user_id}"
+        lock = _ANNOUNCEMENT_LOCKS.setdefault(f"missing-alert:{alert_id}", asyncio.Lock())
+        async with lock:
+            try:
+                previous = await alert_collection.find_one({"_id": alert_id})
+                previous_missing = sorted(
+                    _as_int(value, 0)
+                    for value in (previous or {}).get("missing_episode_numbers", [])
+                )
+                previous_quality_state = (previous or {}).get("missing_quality_tiers") or []
+                same_state = (
+                    previous is not None
+                    and previous.get("alert_format_version") == alert_format_version
+                    and previous_missing == missing_state
+                    and previous_quality_state == quality_state
+                )
+
+                if has_issues:
+                    if not (same_state and previous.get("delivery_status") == "sent"):
+                        changed_recipients.append((user_id, alert_id))
+                else:
+                    if not same_state or previous.get("delivery_status") != "resolved":
+                        await alert_collection.update_one(
+                            {"_id": alert_id},
+                            {"$set": {
+                                "tmdb_id": tmdb_id,
+                                "title": title,
+                                "year": year or None,
+                                "season_number": season_number,
+                                "approver_id": user_id,
+                                "missing_episode_numbers": [],
+                                "missing_quality_tiers": [],
+                                "alert_format_version": alert_format_version,
+                                "delivery_status": "resolved",
+                                "resolved_at": datetime.now(timezone.utc).replace(tzinfo=None),
+                                "updated_at": datetime.now(timezone.utc).replace(tzinfo=None),
+                            }},
+                            upsert=True,
+                        )
+            except Exception as e:
+                LOGGER.warning(
+                    f"Could not inspect missing episode audit state for approver {user_id}, "
+                    f"tv={tmdb_id} S{season_number:02d}: {e}"
+                )
+
+    page_key = f"tv:{tmdb_id}:season:{season_number:02d}"
+    page_collection = db.dbs["tracking"]["season_missing_episode_telegraph_pages"]
+    page_record = await page_collection.find_one({"_id": page_key})
+
+    if not has_issues:
+        # Keep an already-shared Telegraph URL truthful after the audit is fixed.
+        # The page flag makes failed resolution edits retry on the next reconciliation.
+        if page_record and page_record.get("has_open_issues", True):
+            try:
+                cleared_content = _build_missing_episode_telegraph_content(
+                    info, season_number, progress, [], {}, indexed_count
+                )
+                await _create_or_update_telegraph_audit_page(
+                    tmdb_id, season_number, title_year, cleared_content, has_issues=False
+                )
+            except Exception as e:
+                LOGGER.warning(
+                    f"Could not mark Telegraph audit resolved for tv={tmdb_id} "
+                    f"S{season_number:02d}; it will retry: {e}"
+                )
+        return
+
+    if not changed_recipients:
+        return
+
+    try:
+        content = _build_missing_episode_telegraph_content(
+            info,
+            season_number,
+            progress,
+            sorted_missing,
+            quality_gaps,
+            indexed_count,
+        )
+        page = await _create_or_update_telegraph_audit_page(
+            tmdb_id, season_number, title_year, content, has_issues=True
+        )
     except Exception as e:
         LOGGER.warning(
-            f"TMDb season completion check failed for tv={tmdb_id_int} "
-            f"season={season_number} ({type(e).__name__})."
+            f"Failed to publish Telegraph episode/quality audit for tv={tmdb_id} "
+            f"S{season_number:02d}: {e}"
         )
-        return None
+        return
+
+    aired_count = len(progress.get("episode_numbers") or [])
+    total_quality_gaps = sum(len(gap.get("missing_tiers") or []) for gap in quality_gaps.values())
+    summary = (
+        "⚠️ <b>Media Library Audit Updated</b>\n"
+        f"📺 <b>{html.escape(title_year)}</b>\n"
+        f"<b>Season {season_number:02d}</b> · {indexed_count}/{aired_count} aired episodes indexed\n"
+        f"🔴 {len(sorted_missing)} completely missing · 🟠 "
+        f"{len(quality_state)} episodes with quality gaps · {total_quality_gaps} missing tiers"
+    )
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("📄 Open full audit", url=page["url"])
+    ]])
+
+    for user_id, alert_id in changed_recipients:
+        try:
+            await StreamBot.send_message(
+                chat_id=user_id,
+                text=summary,
+                parse_mode=ParseMode.HTML,
+                reply_markup=keyboard,
+                disable_web_page_preview=True,
+            )
+            await alert_collection.update_one(
+                {"_id": alert_id},
+                {"$set": {
+                    "tmdb_id": tmdb_id,
+                    "title": title,
+                    "year": year or None,
+                    "season_number": season_number,
+                    "approver_id": user_id,
+                    "missing_episode_numbers": missing_state,
+                    "missing_quality_tiers": quality_state,
+                    "indexed_aired_episode_count": indexed_count,
+                    "expected_aired_episode_count": aired_count,
+                    "alert_format_version": alert_format_version,
+                    "delivery_status": "sent",
+                    "telegraph_url": page["url"],
+                    "telegraph_path": page["path"],
+                    "notified_at": datetime.now(timezone.utc).replace(tzinfo=None),
+                    "updated_at": datetime.now(timezone.utc).replace(tzinfo=None),
+                }},
+                upsert=True,
+            )
+            LOGGER.info(
+                f"Sent Telegraph missing episode/quality audit link to approver {user_id} for "
+                f"tv={tmdb_id} S{season_number:02d}: missing episodes={missing_state}, "
+                f"quality-gap episodes={[item['episode_number'] for item in quality_state]}"
+            )
+        except Exception as e:
+            LOGGER.warning(
+                f"Failed to send Telegraph audit link to approver {user_id} for "
+                f"tv={tmdb_id} S{season_number:02d}: {e}"
+            )
 
 
 def _build_episode_info(info: dict, doc: dict | None, season_number: int, episode_number: int) -> dict:
@@ -1254,6 +1855,33 @@ async def _maybe_consolidate_season(info: dict, doc: dict, chat) -> bool:
     if not tmdb_id or season_number <= 0:
         return False
 
+    season = _find_season(doc, season_number)
+    if not season:
+        LOGGER.warning(
+            f"Season announcement cannot run for tv={tmdb_id} S{season_number:02d}: "
+            "season is absent from the indexed media document."
+        )
+        return False
+
+    # Progress includes already-aired episodes even when the same season also
+    # contains future episodes. That lets us alert approvers without treating
+    # the season as complete prematurely.
+    progress = await _get_tmdb_season_progress(tmdb_id, season_number)
+    if progress:
+        aired_numbers = set(progress.get("episode_numbers") or [])
+        quality_audit = _build_season_quality_audit(season, aired_numbers)
+        missing_aired_numbers = quality_audit["missing_episode_numbers"]
+        await _notify_approvers_missing_episodes(
+            info,
+            season_number,
+            progress,
+            missing_aired_numbers,
+            quality_audit["indexed_count"],
+            quality_audit["quality_gaps"],
+        )
+
+    # Keep the existing season-completion rule: no consolidated season post
+    # until every regular metadata episode has actually aired.
     metadata = await _get_tmdb_season_metadata(tmdb_id, season_number)
     if not metadata:
         LOGGER.debug(
@@ -1262,13 +1890,6 @@ async def _maybe_consolidate_season(info: dict, doc: dict, chat) -> bool:
         )
         return False
 
-    season = _find_season(doc, season_number)
-    if not season:
-        LOGGER.warning(
-            f"Season announcement cannot run for tv={tmdb_id} S{season_number:02d}: "
-            "season is absent from the indexed media document."
-        )
-        return False
     expected_numbers = metadata["episode_numbers"]
     indexed_numbers = {
         number for episode in (season.get("episodes") or [])
@@ -1289,7 +1910,7 @@ async def _maybe_consolidate_season(info: dict, doc: dict, chat) -> bool:
     if not await _publish_or_update(key, chat, season_info, metadata):
         return False
 
-    # Only remove episode posts after the season post has been confirmed.
+    # Only remove episode posts after the consolidated season post is confirmed.
     await _cleanup_episode_announcements(tmdb_id, season_number, key)
     LOGGER.info(
         f"Published consolidated season announcement for tv={tmdb_id} S{season_number:02d} "
