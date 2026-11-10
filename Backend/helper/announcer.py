@@ -1,8 +1,9 @@
 """Telegram channel announcements for newly indexed media.
 
-Announcements are keyed per movie, episode, or completed season.  The public
-post is a Telegram Rich Message (HTML + poster slideshow) sent through the Bot
-API; Pyrogram remains the fallback for older Bot API deployments.
+Announcements are keyed per movie, episode, or completed season. The canonical
+post is kept current; a newly-added quality also produces a fresh, marked alert
+post so channel subscribers can notice the update. Posts are Telegram Rich
+Messages (HTML + poster slideshow) sent through the Bot API.
 """
 from __future__ import annotations
 
@@ -93,6 +94,28 @@ def _unique_qualities(items) -> list[str]:
         if quality:
             values.add(quality)
     return sorted(values, key=_quality_sort_key)
+
+
+def _normalise_quality_names(values) -> list[str]:
+    """Normalize quality labels from either DB objects or plain string lists."""
+    if isinstance(values, str):
+        values = [values]
+    items = []
+    for value in values or []:
+        if isinstance(value, dict):
+            items.append(value)
+        elif value:
+            items.append({"quality": str(value)})
+    return _unique_qualities(items)
+
+
+def _new_quality_labels(current, previous) -> list[str]:
+    """Return only quality labels newly present in the current announcement."""
+    previous_set = set(_normalise_quality_names(previous))
+    return [
+        quality for quality in _normalise_quality_names(current)
+        if quality not in previous_set
+    ]
 
 
 def _released_regular_episode_numbers(metadata_episodes, expected_count: int, today=None) -> set[int] | None:
@@ -259,7 +282,12 @@ def _build_caption(info: dict) -> str:
         "</table>",
     ])
 
-    parts = [header, "", table]
+    parts = [header]
+    newly_added = _normalise_quality_names(info.get("newly_added_qualities"))
+    if newly_added:
+        added_text = html.escape(" | ".join(newly_added), quote=False)
+        parts.extend(["", f"🆕 <b>NEW QUALITY ADDED:</b> <b>{added_text}</b>"])
+    parts.extend(["", table])
     description = str(description or "").strip()
     if description:
         parts.extend([
@@ -297,6 +325,12 @@ def _build_classic_caption(info: dict) -> str:
         description = info.get("description") or ""
 
     lines = [heading]
+    newly_added = _normalise_quality_names(info.get("newly_added_qualities"))
+    if newly_added:
+        lines.extend([
+            "",
+            f"🆕 <b>NEW QUALITY ADDED:</b> <b>{html.escape(' | '.join(newly_added))}</b>",
+        ])
     fields = [
         ("Original Name", info.get("original_title") or title),
         ("AKA", info.get("aka") or "N/A"),
@@ -766,52 +800,183 @@ async def _enrich_announcement_info(info: dict) -> dict:
     return result
 
 
+def _collect_tracked_message_refs(record: dict | None, fallback_chat=None) -> list[dict]:
+    """Collect every active/legacy/pending Telegram post as chat/message pairs."""
+    record = record or {}
+    default_chat = record.get("chat_id") or fallback_chat
+    refs: list[dict] = []
+    seen: set[tuple[str, int]] = set()
+
+    def add(chat_id, message_id):
+        parsed_id = _as_int(message_id)
+        if chat_id is None or parsed_id is None or parsed_id <= 0:
+            return
+        marker = (str(chat_id), parsed_id)
+        if marker in seen:
+            return
+        seen.add(marker)
+        refs.append({"chat_id": chat_id, "message_id": parsed_id})
+
+    # The canonical post and V3 alert copies all lived in record.chat_id.
+    add(default_chat, record.get("message_id"))
+    for message_id in record.get("quality_alert_message_ids") or []:
+        add(default_chat, message_id)
+    last_alert = record.get("last_quality_alert") or {}
+    if isinstance(last_alert, dict):
+        add(last_alert.get("chat_id") or default_chat, last_alert.get("message_id"))
+
+    # V4 persists failed deletions individually so they can be retried even if
+    # the active announcement moves to another channel later.
+    for item in record.get("pending_delete_messages") or []:
+        if isinstance(item, dict):
+            add(item.get("chat_id") or default_chat, item.get("message_id"))
+        else:  # tolerate an early V4/dev record that stored only message ids
+            add(default_chat, item)
+    return refs
+
+
+async def _flush_pending_announcement_deletes(key: str) -> bool:
+    """Retry queued deletions; retain every failed reference for a later retry."""
+    collection = db.dbs["tracking"]["announced"]
+    record = await collection.find_one({"_id": key})
+    if not record:
+        return True
+
+    pending = []
+    seen = set()
+    for item in record.get("pending_delete_messages") or []:
+        if not isinstance(item, dict):
+            item = {"chat_id": record.get("chat_id"), "message_id": item}
+        chat_id = item.get("chat_id") or record.get("chat_id")
+        message_id = _as_int(item.get("message_id"))
+        if chat_id is None or message_id is None or message_id <= 0:
+            continue
+        marker = (str(chat_id), message_id)
+        if marker not in seen:
+            seen.add(marker)
+            pending.append({"chat_id": chat_id, "message_id": message_id})
+
+    if not pending:
+        return True
+
+    remaining = []
+    for item in pending:
+        if not await _delete_telegram_message(item["chat_id"], item["message_id"]):
+            remaining.append(item)
+
+    await collection.update_one(
+        {"_id": key},
+        {"$set": {
+            "pending_delete_messages": remaining,
+            "updated_at": datetime.utcnow(),
+        }},
+        upsert=True,
+    )
+    if remaining:
+        LOGGER.warning(
+            f"Announcement {key} has {len(remaining)} old Telegram post(s) queued for deletion retry."
+        )
+    return not remaining
+
+
+async def _persist_replacement_and_cleanup(
+    key: str,
+    collection,
+    common_fields: dict,
+    record: dict | None,
+    old_chat,
+    new_chat,
+    new_message_id: int,
+    now: datetime,
+    current_qualities: list[str],
+    newly_added: list[str],
+) -> bool:
+    """Persist the newly published post before deleting any previous posts."""
+    # Include the previous canonical post, V3 quality-alert copies, and any
+    # deletion already pending from an earlier attempt. Preserve chat ids.
+    refs = _collect_tracked_message_refs(record, fallback_chat=old_chat)
+    refs = [
+        item for item in refs
+        if not (str(item["chat_id"]) == str(new_chat) and item["message_id"] == int(new_message_id))
+    ]
+
+    fields = dict(common_fields)
+    fields.update({
+        "chat_id": new_chat,
+        "message_id": int(new_message_id),
+        "published_qualities": current_qualities,
+        "created_at": (record or {}).get("created_at") or now,
+        "quality_alert_message_ids": [],
+        "last_quality_alert": None,
+        "pending_delete_messages": refs,
+        "last_quality_update": ({
+            "qualities": newly_added,
+            "sent_at": now,
+        } if newly_added else (record or {}).get("last_quality_update")),
+    })
+
+    # Do not delete old posts unless MongoDB has saved the new active message id.
+    try:
+        await collection.update_one({"_id": key}, {"$set": fields}, upsert=True)
+    except Exception:
+        LOGGER.critical(
+            f"New announcement {new_message_id} for {key} was published, but its tracking write failed. "
+            "Previous posts were deliberately kept; reconcile MongoDB before retrying.",
+            exc_info=True,
+        )
+        return False
+
+    # New post is now the active tracked announcement. Old posts can be removed.
+    await _flush_pending_announcement_deletes(key)
+    return True
+
+
 async def _publish_or_update(key: str, chat, info: dict, season_metadata: dict | None = None) -> bool:
-    """Create a post once, then edit the same Telegram message on later updates."""
+    """Keep one active announcement and replace it when a new quality appears.
+
+    V4 quality-update flow:
+      1. Publish a fresh post containing the complete quality list and a
+         "NEW QUALITY ADDED" banner.
+      2. Persist its message id as the active announcement in MongoDB.
+      3. Delete the old canonical post and all V3 alert copies.
+
+    The old posts are never deleted before both the new Telegram post and its
+    MongoDB tracking record are confirmed. Failed deletions remain queued.
+    """
     lock = _ANNOUNCEMENT_LOCKS.setdefault(key, asyncio.Lock())
     async with lock:
         info = await _enrich_announcement_info(info)
+        current_qualities = _normalise_quality_names(
+            info.get("qualities") or ([info.get("quality")] if info.get("quality") else [])
+        )
+        if current_qualities:
+            info["qualities"] = current_qualities
+
         collection = db.dbs["tracking"]["announced"]
         record = await collection.find_one({"_id": key})
         poster_urls = await _get_posters(info, season_metadata)
         message_id = (record or {}).get("message_id")
         old_chat = (record or {}).get("chat_id") or chat
 
-        if message_id:
-            if await _edit_announcement(old_chat, message_id, info, poster_urls):
-                update_fields = {
-                    "chat_id": old_chat,
-                    "message_id": int(message_id),
-                    "updated_at": datetime.utcnow(),
-                    "kind": info.get("announcement_kind"),
-                    "tmdb_id": info.get("tmdb_id"),
-                    "media_type": info.get("media_type"),
-                    "season_number": info.get("season_number"),
-                    "episode_number": info.get("episode_number"),
-                }
-                if season_metadata:
-                    update_fields.update({
-                        "episode_numbers": sorted(season_metadata.get("episode_numbers") or []),
-                        "season_poster_path": season_metadata.get("poster_path") or "",
-                        "season_overview": season_metadata.get("season_overview") or "",
-                        "season_name": season_metadata.get("season_name") or "",
-                    })
-                await collection.update_one(
-                    {"_id": key},
-                    {"$set": update_fields},
-                    upsert=True,
-                )
-                return True
+        # V2 migration uses the database's pre-ingestion snapshot. V3+ records
+        # persist the exact quality set shown in their active announcement.
+        stored_snapshot = (record or {}).get("published_qualities")
+        if isinstance(stored_snapshot, list):
+            previous_qualities = _normalise_quality_names(stored_snapshot)
+        elif "_previous_qualities" in info and info.get("_previous_qualities") is not None:
+            previous_qualities = _normalise_quality_names(info.get("_previous_qualities"))
+        else:
+            previous_qualities = None
 
-        new_message_id = await _send_announcement(chat, info, poster_urls)
-        if not new_message_id:
-            return False
+        newly_added = _new_quality_labels(current_qualities, previous_qualities or [])
+        has_baseline = previous_qualities is not None
+        # Do not call the first-ever announcement a quality update. Existing V3
+        # tracking rows count as published even if their post was deleted manually.
+        is_quality_update = bool(record and newly_added and has_baseline)
+        now = datetime.utcnow()
 
-        update_fields = {
-            "chat_id": chat,
-            "message_id": int(new_message_id),
-            "updated_at": datetime.utcnow(),
-            "created_at": (record or {}).get("created_at") or datetime.utcnow(),
+        common_fields = {
+            "updated_at": now,
             "kind": info.get("announcement_kind"),
             "tmdb_id": info.get("tmdb_id"),
             "media_type": info.get("media_type"),
@@ -819,21 +984,70 @@ async def _publish_or_update(key: str, chat, info: dict, season_metadata: dict |
             "episode_number": info.get("episode_number"),
         }
         if season_metadata:
-            update_fields.update({
-                # Persist a JSON/BSON-safe list rather than a Python set.
+            common_fields.update({
                 "episode_numbers": sorted(season_metadata.get("episode_numbers") or []),
                 "season_poster_path": season_metadata.get("poster_path") or "",
                 "season_overview": season_metadata.get("season_overview") or "",
                 "season_name": season_metadata.get("season_name") or "",
             })
-        await collection.update_one(
-            {"_id": key},
-            {"$set": update_fields},
-            upsert=True,
+
+        # A genuine quality addition is a replacement transaction, not an edit
+        # followed by another copy. The original remains until the fresh post
+        # and its new MongoDB message id are safely stored.
+        if is_quality_update:
+            replacement_info = dict(info)
+            replacement_info["newly_added_qualities"] = newly_added
+            new_message_id = await _send_announcement(chat, replacement_info, poster_urls)
+            if not new_message_id:
+                LOGGER.warning(
+                    f"Quality replacement post failed for {key}; keeping the old announcement intact."
+                )
+                return False
+            return await _persist_replacement_and_cleanup(
+                key, collection, common_fields, record, old_chat, chat,
+                new_message_id, now, current_qualities, newly_added,
+            )
+
+        # No new quality: update the current active post in place. This branch
+        # also cleans up duplicate V3 alert copies left by the previous version.
+        if message_id:
+            if await _edit_announcement(old_chat, message_id, info, poster_urls):
+                active_ref = (str(old_chat), int(message_id))
+                stale_refs = [
+                    item for item in _collect_tracked_message_refs(record, fallback_chat=old_chat)
+                    if (str(item["chat_id"]), item["message_id"]) != active_ref
+                ]
+                pending = stale_refs
+                # Persist the active canonical post and cleanup queue first.
+                await collection.update_one(
+                    {"_id": key},
+                    {"$set": {
+                        **common_fields,
+                        "chat_id": old_chat,
+                        "message_id": int(message_id),
+                        "published_qualities": current_qualities,
+                        "quality_alert_message_ids": [],
+                        "last_quality_alert": None,
+                        "pending_delete_messages": pending,
+                    }},
+                    upsert=True,
+                )
+                await _flush_pending_announcement_deletes(key)
+                return True
+
+        # Initial post, or recovery when Telegram says the active post cannot
+        # be edited. If this is still a quality update, preserve the banner.
+        replacement_info = dict(info)
+        if is_quality_update:
+            replacement_info["newly_added_qualities"] = newly_added
+        new_message_id = await _send_announcement(chat, replacement_info, poster_urls)
+        if not new_message_id:
+            return False
+        return await _persist_replacement_and_cleanup(
+            key, collection, common_fields, record, old_chat, chat,
+            new_message_id, now, current_qualities,
+            newly_added if is_quality_update else [],
         )
-        if message_id and old_chat:
-            await _delete_telegram_message(old_chat, message_id)
-        return True
 
 
 async def _get_tmdb_season_metadata(tmdb_id, season_number: int) -> dict | None:
@@ -917,6 +1131,7 @@ def _build_episode_info(info: dict, doc: dict | None, season_number: int, episod
         "announcement_kind": "episode",
         "season_number": season_number,
         "episode_number": episode_number,
+        "_previous_qualities": info.get("_previous_qualities"),
     })
     episode = _find_episode(doc, season_number, episode_number) if doc else None
     result["episode_title"] = (episode or {}).get("title") or info.get("episode_title") or ""
@@ -938,12 +1153,41 @@ def _build_season_info(
     result.update({
         "announcement_kind": "season",
         "season_number": season_number,
+        "_previous_qualities": info.get("_previous_season_qualities"),
         "season_name": (season_metadata or {}).get("season_name") or f"Season {season_number}",
         "season_overview": (season_metadata or {}).get("season_overview") or "",
         "season_poster_path": (season_metadata or {}).get("poster_path") or "",
         "qualities": _season_qualities(season, episode_numbers),
     })
     return result
+
+
+async def _delete_tracked_announcement_messages(record: dict) -> bool:
+    """Delete the active post plus every V3/V4 superseded message reference."""
+    refs = _collect_tracked_message_refs(record)
+    deleted_all = True
+    for item in refs:
+        if not await _delete_telegram_message(item["chat_id"], item["message_id"]):
+            deleted_all = False
+    return deleted_all
+
+
+async def _retry_pending_announcement_deletes() -> None:
+    """Retry old-post deletions that failed after a V4 replacement."""
+    collection = db.dbs["tracking"]["announced"]
+    cursor = collection.find({
+        "pending_delete_messages": {"$exists": True, "$ne": []},
+    })
+    async for record in cursor:
+        key = str(record.get("_id") or "")
+        if not key:
+            continue
+        lock = _ANNOUNCEMENT_LOCKS.setdefault(key, asyncio.Lock())
+        async with lock:
+            try:
+                await _flush_pending_announcement_deletes(key)
+            except Exception as e:
+                LOGGER.warning(f"Pending announcement cleanup failed for {key}: {e}")
 
 
 async def _remove_legacy_tv_announcement(tmdb_id) -> None:
@@ -953,7 +1197,7 @@ async def _remove_legacy_tv_announcement(tmdb_id) -> None:
     record = await collection.find_one({"_id": key})
     if not record:
         return
-    if await _delete_telegram_message(record.get("chat_id"), record.get("message_id")):
+    if await _delete_tracked_announcement_messages(record):
         await collection.delete_one({"_id": key})
 
 
@@ -963,10 +1207,17 @@ async def _cleanup_episode_announcements(tmdb_id, season_number: int, season_key
     prefix = re.escape(f"tv:{tmdb_id}:episode:{season_number:02d}:")
     cursor = collection.find({"_id": {"$regex": f"^{prefix}"}})
     async for record in cursor:
-        if await _delete_telegram_message(record.get("chat_id"), record.get("message_id")):
+        if await _delete_tracked_announcement_messages(record):
             await collection.update_one(
                 {"_id": record["_id"]},
-                {"$set": {"message_id": None, "superseded_by": season_key, "updated_at": datetime.utcnow()}},
+                {"$set": {
+                    "message_id": None,
+                    "quality_alert_message_ids": [],
+                    "last_quality_alert": None,
+                    "pending_delete_messages": [],
+                    "superseded_by": season_key,
+                    "updated_at": datetime.utcnow(),
+                }},
             )
         else:
             await collection.update_one(
@@ -984,10 +1235,16 @@ async def _retry_superseded_episode_deletes() -> None:
         "message_id": {"$ne": None},
     })
     async for record in cursor:
-        if await _delete_telegram_message(record.get("chat_id"), record.get("message_id")):
+        if await _delete_tracked_announcement_messages(record):
             await collection.update_one(
                 {"_id": record["_id"]},
-                {"$set": {"message_id": None, "updated_at": datetime.utcnow()}},
+                {"$set": {
+                    "message_id": None,
+                    "quality_alert_message_ids": [],
+                    "last_quality_alert": None,
+                    "pending_delete_messages": [],
+                    "updated_at": datetime.utcnow(),
+                }},
             )
 
 
@@ -1051,6 +1308,7 @@ async def _announce_movie(info: dict, chat) -> None:
     announcement.update({
         "announcement_kind": "movie",
         "qualities": _movie_qualities(doc) or ([info.get("quality")] if info.get("quality") else []),
+        "_previous_qualities": info.get("_previous_qualities"),
     })
     await _publish_or_update(f"movie:{tmdb_id}", chat, announcement)
 
@@ -1126,6 +1384,7 @@ async def _reconcile_pending_seasons_once() -> None:
         return
 
     collection = db.dbs["tracking"]["announced"]
+    await _retry_pending_announcement_deletes()
     await _retry_superseded_episode_deletes()
     cursor = collection.find(
         {
@@ -1224,7 +1483,7 @@ async def delete_announcement(media_type: str, tmdb_id) -> None:
         cursor = collection.find({"_id": f"movie:{tmdb_id}"})
 
     async for record in cursor:
-        deleted = await _delete_telegram_message(record.get("chat_id"), record.get("message_id"))
+        deleted = await _delete_tracked_announcement_messages(record)
         if deleted:
             await collection.delete_one({"_id": record["_id"]})
 

@@ -37,6 +37,15 @@ _COUNT_TTL = 60
 _count_cache = BoundedDict(500)
 
 
+def _announcement_quality_labels(items) -> list[str]:
+    """Return unique live quality labels for announcement migration snapshots."""
+    return sorted({
+        str(item.get("quality") or "").strip()
+        for item in (items or [])
+        if isinstance(item, dict) and not item.get("is_dead") and str(item.get("quality") or "").strip()
+    })
+
+
 class Database:
     def __init__(self, db_name: str = "dbFyvio"):
         self.db_uris = Telegram.DATABASE
@@ -1565,6 +1574,8 @@ class Database:
 
         #----- INSERT NEW MOVIE ----------------
         if not existing_movie:
+            if status is not None:
+                status["announcement_previous_qualities"] = []
             try:
                 movie_dict["db_index"] = self.current_db_index
                 result = await self.dbs[current_db_key]["movie"].insert_one(movie_dict)
@@ -1588,6 +1599,11 @@ class Database:
             existing_movie["is_anime"] = True
 
         existing_qualities = existing_movie.get("telegram", [])
+        if status is not None:
+            # Snapshot before mutating the media document.  V2 announcement
+            # records did not store this list, so the announcer uses this value
+            # to detect the first V3 quality addition without guessing.
+            status["announcement_previous_qualities"] = _announcement_quality_labels(existing_qualities)
 
         existing_qualities = await self._apply_quality_update(
             existing_qualities, quality_to_update, self._is_personal_tmdb(tmdb_id), status
@@ -1635,6 +1651,9 @@ class Database:
 
         #----- INSERT NEW TV ----------------
         if not existing_tv:
+            if status is not None:
+                status["announcement_previous_episode_qualities"] = {}
+                status["announcement_previous_season_qualities"] = {}
             try:
                 tv_show_dict["db_index"] = self.current_db_index
                 result = await self.dbs[current_db_key]["tv"].insert_one(tv_show_dict)
@@ -1656,6 +1675,51 @@ class Database:
             existing_tv["kitsu_id"] = kitsu_id
         if tv_show_dict.get("is_anime"):
             existing_tv["is_anime"] = True
+
+        if status is not None:
+            episode_snapshots = {}
+            season_snapshots = {}
+            existing_seasons = existing_tv.get("seasons") or []
+            for incoming_season in tv_show_dict.get("seasons") or []:
+                season_number = incoming_season.get("season_number")
+                existing_season_snapshot = next((
+                    item for item in existing_seasons
+                    if item.get("season_number") == season_number
+                ), None)
+                existing_episodes_snapshot = (existing_season_snapshot or {}).get("episodes") or []
+                season_quality_items = []
+                for existing_episode_snapshot in existing_episodes_snapshot:
+                    existing_episode_number = existing_episode_snapshot.get("episode_number", 0)
+                    try:
+                        existing_episode_number = int(existing_episode_number)
+                    except (TypeError, ValueError):
+                        existing_episode_number = 0
+                    # Mirror announcer._season_qualities: ignore specials and
+                    # synthetic combined-pack entries when creating the baseline.
+                    if existing_episode_number <= 0 or existing_episode_number >= 1000:
+                        continue
+                    season_quality_items.extend(existing_episode_snapshot.get("telegram") or [])
+                season_snapshots[str(season_number)] = _announcement_quality_labels(season_quality_items)
+                for incoming_episode in incoming_season.get("episodes") or []:
+                    episode_number = incoming_episode.get("episode_number")
+                    existing_episode_snapshot = next((
+                        item for item in existing_episodes_snapshot
+                        if item.get("episode_number") == episode_number
+                    ), None)
+                    if (
+                        not existing_episode_snapshot
+                        and incoming_episode.get("absolute_episode") is not None
+                    ):
+                        existing_episode_snapshot = next((
+                            item for item in existing_episodes_snapshot
+                            if item.get("absolute_episode") is not None
+                            and item.get("absolute_episode") == incoming_episode.get("absolute_episode")
+                        ), None)
+                    episode_snapshots[f"{season_number}:{episode_number}"] = _announcement_quality_labels(
+                        (existing_episode_snapshot or {}).get("telegram") or []
+                    )
+            status["announcement_previous_episode_qualities"] = episode_snapshots
+            status["announcement_previous_season_qualities"] = season_snapshots
 
         for season in tv_show_dict["seasons"]:
             existing_season = next(

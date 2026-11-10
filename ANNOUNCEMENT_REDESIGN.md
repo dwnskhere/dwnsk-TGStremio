@@ -23,11 +23,11 @@ TMDb supplies original names, alternative titles, runtime, episode stills, and l
 
 ## Announcement and quality behaviour
 
-- Movies retain one post per TMDb movie. New qualities edit that post in place.
-- Episodes retain one post per season/episode. New qualities edit that episode post in place.
+- Movies retain one active post per TMDb movie. When a genuinely new quality is indexed, a fresh replacement post is published with a `NEW QUALITY ADDED` banner, its new Telegram message ID is saved, and only then are the old active post and any V3 alert copies deleted.
+- Episodes retain one active post per season/episode. New qualities use the same publish → persist → delete replacement sequence.
 - A completed season is published once the metadata-defined checklist is complete and each expected regular episode has at least one non-dead indexed stream. Season 0, specials, and synthetic combined-pack entries are excluded.
 - The season post is confirmed before individual episode posts are deleted. Failed deletions are marked for retry by the hourly reconciler.
-- Later quality additions update the season post.
+- Later quality additions replace the season post using the same publish → persist → delete sequence.
 - Quality values are unique, sorted low-to-high, and dead streams (`is_dead=True`) are excluded.
 - The hourly reconciler can recover earlier episode-tracking rows even if older rows do not have the newer `kind` metadata field.
 
