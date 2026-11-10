@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import html
+import json
 import re
+from urllib.parse import quote
 import time
 from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
@@ -30,6 +32,8 @@ from Backend.pyrofork.bot import StreamBot, get_streambot_url
 
 
 _BOT_API_BASE = "https://api.telegram.org/bot{}"
+_TELEGRAPH_API_BASE = "https://api.telegra.ph"
+_TELEGRAPH_ACCOUNT_LOCK = asyncio.Lock()
 _SEASON_CACHE_TTL = 60 * 60
 _SEASON_NEGATIVE_CACHE_TTL = 5 * 60
 _IMAGE_CACHE_TTL = 6 * 60 * 60
@@ -1311,95 +1315,223 @@ def _build_season_quality_audit(season: dict, aired_episode_numbers: set[int]) -
     }
 
 
-def _build_missing_episode_rich_message(
+def _build_missing_episode_telegraph_content(
     info: dict,
     season_number: int,
     progress: dict,
     missing_numbers: list[int],
     quality_gaps: dict[int, dict],
     indexed_count: int,
-) -> dict:
-    """Build a native Telegram Rich Message with an episode audit table."""
+) -> list[dict]:
+    """Build a Telegraph-compatible rich document for one season audit.
+
+    Telegraph's supported NodeElement tags do not include HTML tables. Use
+    consistent episode sections with bold labels instead of emitting an
+    unsupported <table> element that Telegraph would reject or strip.
+    """
     tmdb_id = _as_int(info.get("tmdb_id"), 0)
     title = str(info.get("title") or progress.get("series_name") or "Unknown TV Show").strip()
     year = _as_int(info.get("year"), _as_int(progress.get("year"), 0))
     title_year = f"{title} ({year})" if year else title
     aired_episodes = progress.get("aired_episodes") or {}
-    all_issue_numbers = sorted(set(missing_numbers) | set(quality_gaps))
-
-    cells = [[
-        {"text": "Episode", "is_header": True},
-        {"text": "Available", "is_header": True},
-        {"text": "Missing", "is_header": True},
-    ]]
-    for number in all_issue_numbers:
-        episode = aired_episodes.get(number) or {}
-        episode_title = str(episode.get("name") or "").strip()
-        code = f"S{season_number:02d}E{number:02d}"
-        episode_cell = [{"type": "bold", "text": code}]
-        if episode_title:
-            episode_cell.extend(["\n", episode_title])
-
-        if number in set(missing_numbers):
-            available_text = "—"
-            missing_text = "ALL MISSING"
-        else:
-            gap = quality_gaps[number]
-            available_text = " | ".join(gap.get("available_qualities") or []) or "Unclassified"
-            missing_text = " | ".join(gap.get("missing_tiers") or [])
-
-        cells.append([
-            {"text": episode_cell, "valign": "top"},
-            {"text": available_text, "valign": "top"},
-            {"text": missing_text, "valign": "top"},
-        ])
-
+    missing_set = {_as_int(number, 0) for number in missing_numbers}
+    gap_numbers = {_as_int(number, 0) for number in quality_gaps}
+    issue_numbers = sorted(number for number in missing_set | gap_numbers if number > 0)
     aired_count = len(progress.get("episode_numbers") or [])
     total_quality_gaps = sum(len(gap.get("missing_tiers") or []) for gap in quality_gaps.values())
-    table_caption = f"Season {season_number:02d} — episode and quality audit"
-    tmdb_url = f"https://www.themoviedb.org/tv/{tmdb_id}"
-    footer = (
-        "Quality tiers are independent: 540p satisfies the 720p tier; "
-        "1440p, 2160p, 4K and higher satisfy the 1080p tier. "
-        "Higher tiers do not replace 480p or the 720p tier."
-    )
-    note = (
-        "Only regular episodes with an air date before today's IST date are audited. "
-        "Episodes dated today or in the future, and episodes without a valid air date, are excluded."
-    )
 
-    blocks = [
-        {"type": "heading", "size": 2, "text": "⚠️ Missing Episodes & Quality Audit"},
-        {
-            "type": "paragraph",
-            "text": [
-                "📺 ",
-                {"type": "bold", "text": title_year},
-                " · ",
-                {"type": "url", "text": f"TMDb ID: {tmdb_id}", "url": tmdb_url},
-            ],
-        },
-        {"type": "heading", "size": 3, "text": f"Season {season_number:02d}"},
-        {
-            "type": "paragraph",
-            "text": (
-                f"📦 Season coverage: {indexed_count}/{aired_count} aired episodes indexed · "
-                f"{len(missing_numbers)} completely missing · "
-                f"{len(quality_gaps)} with quality gaps · {total_quality_gaps} missing quality tiers"
-            ),
-        },
-        {
-            "type": "table",
-            "caption": table_caption,
-            "is_bordered": True,
-            "is_striped": True,
-            "is_compact": True,
-            "cells": cells,
-        },
-        {"type": "paragraph", "text": note},
-        {"type": "footer", "text": footer},
+    nodes: list[dict] = [
+        {"tag": "h3", "children": ["⚠️ Missing Episodes & Quality Audit"]},
+        {"tag": "p", "children": [
+            {"tag": "strong", "children": [f"📺 {title_year}"]},
+            " · ",
+            {"tag": "a", "attrs": {"href": f"https://www.themoviedb.org/tv/{tmdb_id}"},
+             "children": [f"TMDb ID: {tmdb_id}"]},
+        ]},
+        {"tag": "h4", "children": [f"Season {season_number:02d} — Episode & Quality Audit"]},
+        {"tag": "p", "children": [
+            {"tag": "strong", "children": ["📦 Season coverage: "]},
+            f"{indexed_count}/{aired_count} aired episodes indexed · ",
+            f"{len(missing_set)} completely missing · ",
+            f"{len(quality_gaps)} with quality gaps · {total_quality_gaps} missing quality tiers",
+        ]},
+        {"tag": "hr"},
     ]
-    return {"blocks": blocks}
+
+    if not issue_numbers:
+        nodes.extend([
+            {"tag": "h4", "children": ["✅ All audited episodes are complete"]},
+            {"tag": "p", "children": [
+                "Every aired regular episode is indexed and has all three required quality tiers."
+            ]},
+        ])
+    else:
+        for number in issue_numbers:
+            episode = aired_episodes.get(number) or {}
+            episode_title = str(episode.get("name") or "Untitled episode").strip()
+            code = f"S{season_number:02d}E{number:02d}"
+            if number in missing_set:
+                available_text = "No active streams"
+                missing_text = "ALL MISSING"
+                marker = "🔴"
+            else:
+                gap = quality_gaps[number]
+                available_text = " | ".join(gap.get("available_qualities") or []) or "Unclassified"
+                missing_text = " | ".join(gap.get("missing_tiers") or [])
+                marker = "🟠"
+            nodes.extend([
+                {"tag": "h4", "children": [f"{marker} {code} — {episode_title}"]},
+                {"tag": "p", "children": [
+                    {"tag": "strong", "children": ["Available: "]},
+                    available_text,
+                    {"tag": "br"},
+                    {"tag": "strong", "children": ["Missing: "]},
+                    missing_text,
+                ]},
+                {"tag": "hr"},
+            ])
+
+    nodes.extend([
+        {"tag": "h4", "children": ["Quality audit rules"]},
+        {"tag": "ul", "children": [
+            {"tag": "li", "children": ["480p is an independent required tier."]},
+            {"tag": "li", "children": ["720p is satisfied by 720p or 540p."]},
+            {"tag": "li", "children": ["1080p is satisfied by 1080p, 1440p, 2160p, 4K, 8K or higher."]},
+            {"tag": "li", "children": ["Higher tiers do not replace the lower required tiers."]},
+            {"tag": "li", "children": ["Dead streams are excluded from the audit."]},
+        ]},
+        {"tag": "blockquote", "children": [
+            "Only regular episodes with an air date before today's IST date are included. "
+            "Episodes dated today or in the future, specials, and episodes without a valid air date are excluded."
+        ]},
+    ])
+    return nodes
+
+
+class _TelegraphAPIError(RuntimeError):
+    def __init__(self, method: str, error: str):
+        self.method = method
+        self.error = str(error or "Unknown Telegraph API error")
+        super().__init__(f"Telegraph API {method} failed: {self.error}")
+
+
+async def _telegraph_api_request(method: str, payload: dict) -> dict:
+    """Call the official Telegraph API using its form-encoded POST interface."""
+    url = f"{_TELEGRAPH_API_BASE}/{method}"
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
+        response = await client.post(url, data=payload)
+    try:
+        body = response.json()
+    except ValueError:
+        body = {}
+    if not isinstance(body, dict) or not body.get("ok"):
+        raise _TelegraphAPIError(method, (body or {}).get("error") or response.text)
+    result = body.get("result")
+    if not isinstance(result, dict):
+        raise _TelegraphAPIError(method, "API returned an invalid result")
+    return result
+
+
+async def _get_telegraph_access_token() -> str:
+    """Get or lazily provision the app's Telegraph account token in MongoDB."""
+    collection = db.dbs["tracking"]["telegraph_accounts"]
+    record_id = "season_quality_audit"
+    record = await collection.find_one({"_id": record_id})
+    token = str((record or {}).get("access_token") or "").strip()
+    if token:
+        return token
+
+    async with _TELEGRAPH_ACCOUNT_LOCK:
+        record = await collection.find_one({"_id": record_id})
+        token = str((record or {}).get("access_token") or "").strip()
+        if token:
+            return token
+
+        account = await _telegraph_api_request("createAccount", {
+            "short_name": "TGStremioAudit",
+            "author_name": "Telegram-Stremio",
+        })
+        token = str(account.get("access_token") or "").strip()
+        if not token:
+            raise _TelegraphAPIError("createAccount", "No access_token was returned")
+        await collection.update_one(
+            {"_id": record_id},
+            {"$set": {
+                "access_token": token,
+                "short_name": "TGStremioAudit",
+                "created_at": datetime.now(timezone.utc).replace(tzinfo=None),
+            }},
+            upsert=True,
+        )
+        return token
+
+
+async def _create_or_update_telegraph_audit_page(
+    tmdb_id: int,
+    season_number: int,
+    title: str,
+    content: list[dict],
+    has_issues: bool | None = None,
+) -> dict:
+    """Publish or update one stable Telegraph page per TV show/season."""
+    token = await _get_telegraph_access_token()
+    pages = db.dbs["tracking"]["season_missing_episode_telegraph_pages"]
+    page_id = f"tv:{tmdb_id}:season:{season_number:02d}"
+    old_page = await pages.find_one({"_id": page_id})
+    page_title = f"{title} — Season {season_number:02d} Episode & Quality Audit"[:256]
+    content_json = json.dumps(content, ensure_ascii=False, separators=(",", ":"))
+    if len(content_json.encode("utf-8")) > 64 * 1024:
+        raise _TelegraphAPIError("createPage/editPage", "Audit page content exceeds Telegraph's 64 KB limit")
+
+    page = None
+    old_path = str((old_page or {}).get("path") or "").strip()
+    if old_path:
+        try:
+            page = await _telegraph_api_request(
+                f"editPage/{quote(old_path, safe='')}",
+                {
+                    "access_token": token,
+                    "title": page_title,
+                    "content": content_json,
+                    "author_name": "Telegram-Stremio",
+                    "return_content": "false",
+                },
+            )
+        except _TelegraphAPIError as error:
+            if error.error not in {"PAGE_NOT_FOUND", "PAGE_NOT_EDITABLE"}:
+                raise
+            LOGGER.warning(
+                f"Stored Telegraph audit page is no longer editable for {page_id}; creating a new page."
+            )
+
+    if page is None:
+        page = await _telegraph_api_request("createPage", {
+            "access_token": token,
+            "title": page_title,
+            "content": content_json,
+            "author_name": "Telegram-Stremio",
+            "return_content": "false",
+        })
+
+    page_url = str(page.get("url") or "").strip()
+    page_path = str(page.get("path") or "").strip()
+    if not page_url or not page_path:
+        raise _TelegraphAPIError("createPage/editPage", "Page URL or path missing from response")
+
+    await pages.update_one(
+        {"_id": page_id},
+        {"$set": {
+            "tmdb_id": tmdb_id,
+            "season_number": season_number,
+            "title": page_title,
+            "url": page_url,
+            "path": page_path,
+            "has_open_issues": has_issues if has_issues is not None else bool((old_page or {}).get("has_open_issues", True)),
+            "updated_at": datetime.now(timezone.utc).replace(tzinfo=None),
+        }},
+        upsert=True,
+    )
+    return {"url": page_url, "path": page_path, "title": page_title}
 
 
 async def _notify_approvers_missing_episodes(
@@ -1410,11 +1542,10 @@ async def _notify_approvers_missing_episodes(
     indexed_count: int,
     quality_gaps: dict[int, dict] | None = None,
 ) -> None:
-    """Send a deduplicated Rich Message audit to each configured approver.
+    """Send compact Telegram notices linking to a rich Telegraph audit page.
 
-    The audit state includes both completely missing episodes and the per-episode
-    missing quality tiers. A changed episode list or quality gap triggers a new
-    notification; unchanged reconciler runs do not.
+    The Telegraph page is shared and updated in place for each show/season.
+    Per-approver deduplication continues to track the episode and quality state.
     """
     tmdb_id = _as_int(info.get("tmdb_id"), 0)
     if not tmdb_id:
@@ -1441,11 +1572,14 @@ async def _notify_approvers_missing_episodes(
         for number, gap in sorted(quality_gaps.items(), key=lambda item: int(item[0]))
     ]
     missing_state = sorted_missing
+    has_issues = bool(missing_state or quality_state)
     record_key = f"tv:{tmdb_id}:season:{season_number:02d}"
     alert_collection = db.dbs["tracking"]["season_missing_episode_alerts"]
     title = str(info.get("title") or progress.get("series_name") or "Unknown TV Show").strip()
     year = _as_int(info.get("year"), _as_int(progress.get("year"), 0))
-    alert_format_version = 2
+    title_year = f"{title} ({year})" if year else title
+    alert_format_version = 3
+    changed_recipients: list[tuple[int, str]] = []
 
     for user_id in recipients:
         alert_id = f"{record_key}:approver:{user_id}"
@@ -1458,113 +1592,138 @@ async def _notify_approvers_missing_episodes(
                     for value in (previous or {}).get("missing_episode_numbers", [])
                 )
                 previous_quality_state = (previous or {}).get("missing_quality_tiers") or []
-                unchanged = (
+                same_state = (
                     previous is not None
                     and previous.get("alert_format_version") == alert_format_version
                     and previous_missing == missing_state
                     and previous_quality_state == quality_state
                 )
-                if unchanged:
-                    continue
 
-                if not sorted_missing and not quality_state:
-                    await alert_collection.update_one(
-                        {"_id": alert_id},
-                        {"$set": {
-                            "tmdb_id": tmdb_id,
-                            "season_number": season_number,
-                            "approver_id": user_id,
-                            "missing_episode_numbers": [],
-                            "missing_quality_tiers": [],
-                            "alert_format_version": alert_format_version,
-                            "resolved_at": datetime.now(timezone.utc).replace(tzinfo=None),
-                            "updated_at": datetime.now(timezone.utc).replace(tzinfo=None),
-                        }},
-                        upsert=True,
-                    )
-                    continue
-
-                rich_message = _build_missing_episode_rich_message(
-                    info,
-                    season_number,
-                    progress,
-                    sorted_missing,
-                    quality_gaps,
-                    indexed_count,
-                )
-                try:
-                    await _bot_api_request("sendRichMessage", {
-                        "chat_id": user_id,
-                        "rich_message": rich_message,
-                    })
-                except _BotAPIError as rich_error:
-                    # Keep approver notifications available on older Bot API
-                    # deployments by falling back to a readable HTML message.
-                    LOGGER.warning(
-                        f"Rich episode audit unavailable for approver {user_id}; "
-                        f"using HTML fallback: {rich_error}"
-                    )
-                    fallback_lines = [
-                        "⚠️ <b>Missing Episodes &amp; Quality Audit</b>",
-                        f"📺 <b>{html.escape(f'{title} ({year})' if year else title)}</b>",
-                        f"<a href=\"https://www.themoviedb.org/tv/{tmdb_id}\">TMDb ID: {tmdb_id}</a>",
-                        f"<b>Season {season_number:02d}</b>",
-                        "<b>Episode | Available | Missing</b>",
-                    ]
-                    aired_episodes = progress.get("aired_episodes") or {}
-                    for number in sorted(set(sorted_missing) | set(quality_gaps)):
-                        episode = aired_episodes.get(number) or {}
-                        code = f"S{season_number:02d}E{number:02d}"
-                        episode_title = html.escape(str(episode.get("name") or ""))
-                        label = f"<code>{code}</code> — {episode_title}" if episode_title else f"<code>{code}</code>"
-                        if number in set(sorted_missing):
-                            available, missing = "—", "ALL MISSING"
-                        else:
-                            gap = quality_gaps[number]
-                            available = " | ".join(gap.get("available_qualities") or []) or "Unclassified"
-                            missing = " | ".join(gap.get("missing_tiers") or [])
-                        fallback_lines.append(
-                            f"{label}\nAvailable: {html.escape(available)}\nMissing: {html.escape(missing)}"
+                if has_issues:
+                    if not (same_state and previous.get("delivery_status") == "sent"):
+                        changed_recipients.append((user_id, alert_id))
+                else:
+                    if not same_state or previous.get("delivery_status") != "resolved":
+                        await alert_collection.update_one(
+                            {"_id": alert_id},
+                            {"$set": {
+                                "tmdb_id": tmdb_id,
+                                "title": title,
+                                "year": year or None,
+                                "season_number": season_number,
+                                "approver_id": user_id,
+                                "missing_episode_numbers": [],
+                                "missing_quality_tiers": [],
+                                "alert_format_version": alert_format_version,
+                                "delivery_status": "resolved",
+                                "resolved_at": datetime.now(timezone.utc).replace(tzinfo=None),
+                                "updated_at": datetime.now(timezone.utc).replace(tzinfo=None),
+                            }},
+                            upsert=True,
                         )
-                    fallback_lines.extend([
-                        "<i>540p satisfies the 720p tier. 1440p/2160p/4K+ satisfy the 1080p tier; tiers are otherwise independent.</i>",
-                        "<i>Only episodes aired before today's IST date are included.</i>",
-                    ])
-                    await StreamBot.send_message(
-                        chat_id=user_id,
-                        text="\n\n".join(fallback_lines),
-                        parse_mode=ParseMode.HTML,
-                        disable_web_page_preview=True,
-                    )
-
-                await alert_collection.update_one(
-                    {"_id": alert_id},
-                    {"$set": {
-                        "tmdb_id": tmdb_id,
-                        "title": title,
-                        "year": year or None,
-                        "season_number": season_number,
-                        "approver_id": user_id,
-                        "missing_episode_numbers": missing_state,
-                        "missing_quality_tiers": quality_state,
-                        "indexed_aired_episode_count": indexed_count,
-                        "expected_aired_episode_count": len(progress.get("episode_numbers") or []),
-                        "alert_format_version": alert_format_version,
-                        "notified_at": datetime.now(timezone.utc).replace(tzinfo=None),
-                        "updated_at": datetime.now(timezone.utc).replace(tzinfo=None),
-                    }},
-                    upsert=True,
+            except Exception as e:
+                LOGGER.warning(
+                    f"Could not inspect missing episode audit state for approver {user_id}, "
+                    f"tv={tmdb_id} S{season_number:02d}: {e}"
                 )
-                LOGGER.info(
-                    f"Sent missing episode/quality audit to approver {user_id} for "
-                    f"tv={tmdb_id} S{season_number:02d}: missing episodes={missing_state}, "
-                    f"quality-gap episodes={[item['episode_number'] for item in quality_state]}"
+
+    page_key = f"tv:{tmdb_id}:season:{season_number:02d}"
+    page_collection = db.dbs["tracking"]["season_missing_episode_telegraph_pages"]
+    page_record = await page_collection.find_one({"_id": page_key})
+
+    if not has_issues:
+        # Keep an already-shared Telegraph URL truthful after the audit is fixed.
+        # The page flag makes failed resolution edits retry on the next reconciliation.
+        if page_record and page_record.get("has_open_issues", True):
+            try:
+                cleared_content = _build_missing_episode_telegraph_content(
+                    info, season_number, progress, [], {}, indexed_count
+                )
+                await _create_or_update_telegraph_audit_page(
+                    tmdb_id, season_number, title_year, cleared_content, has_issues=False
                 )
             except Exception as e:
                 LOGGER.warning(
-                    f"Failed to notify approver {user_id} about missing episodes/qualities for "
-                    f"tv={tmdb_id} S{season_number:02d}: {e}"
+                    f"Could not mark Telegraph audit resolved for tv={tmdb_id} "
+                    f"S{season_number:02d}; it will retry: {e}"
                 )
+        return
+
+    if not changed_recipients:
+        return
+
+    try:
+        content = _build_missing_episode_telegraph_content(
+            info,
+            season_number,
+            progress,
+            sorted_missing,
+            quality_gaps,
+            indexed_count,
+        )
+        page = await _create_or_update_telegraph_audit_page(
+            tmdb_id, season_number, title_year, content, has_issues=True
+        )
+    except Exception as e:
+        LOGGER.warning(
+            f"Failed to publish Telegraph episode/quality audit for tv={tmdb_id} "
+            f"S{season_number:02d}: {e}"
+        )
+        return
+
+    aired_count = len(progress.get("episode_numbers") or [])
+    total_quality_gaps = sum(len(gap.get("missing_tiers") or []) for gap in quality_gaps.values())
+    summary = (
+        "⚠️ <b>Media Library Audit Updated</b>\n"
+        f"📺 <b>{html.escape(title_year)}</b>\n"
+        f"<b>Season {season_number:02d}</b> · {indexed_count}/{aired_count} aired episodes indexed\n"
+        f"🔴 {len(sorted_missing)} completely missing · 🟠 "
+        f"{len(quality_state)} episodes with quality gaps · {total_quality_gaps} missing tiers"
+    )
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("📄 Open full audit", url=page["url"])
+    ]])
+
+    for user_id, alert_id in changed_recipients:
+        try:
+            await StreamBot.send_message(
+                chat_id=user_id,
+                text=summary,
+                parse_mode=ParseMode.HTML,
+                reply_markup=keyboard,
+                disable_web_page_preview=True,
+            )
+            await alert_collection.update_one(
+                {"_id": alert_id},
+                {"$set": {
+                    "tmdb_id": tmdb_id,
+                    "title": title,
+                    "year": year or None,
+                    "season_number": season_number,
+                    "approver_id": user_id,
+                    "missing_episode_numbers": missing_state,
+                    "missing_quality_tiers": quality_state,
+                    "indexed_aired_episode_count": indexed_count,
+                    "expected_aired_episode_count": aired_count,
+                    "alert_format_version": alert_format_version,
+                    "delivery_status": "sent",
+                    "telegraph_url": page["url"],
+                    "telegraph_path": page["path"],
+                    "notified_at": datetime.now(timezone.utc).replace(tzinfo=None),
+                    "updated_at": datetime.now(timezone.utc).replace(tzinfo=None),
+                }},
+                upsert=True,
+            )
+            LOGGER.info(
+                f"Sent Telegraph missing episode/quality audit link to approver {user_id} for "
+                f"tv={tmdb_id} S{season_number:02d}: missing episodes={missing_state}, "
+                f"quality-gap episodes={[item['episode_number'] for item in quality_state]}"
+            )
+        except Exception as e:
+            LOGGER.warning(
+                f"Failed to send Telegraph audit link to approver {user_id} for "
+                f"tv={tmdb_id} S{season_number:02d}: {e}"
+            )
 
 
 def _build_episode_info(info: dict, doc: dict | None, season_number: int, episode_number: int) -> dict:
