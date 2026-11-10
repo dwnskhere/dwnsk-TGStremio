@@ -1,23 +1,49 @@
 {% extends "public_base.html" %}
 {% block title %}Plans — CodecIndex{% endblock %}
 {% block content %}
-<section>
-  <p class="eyebrow" style="text-align:center">CODECINDEX · MEMBERSHIP</p>
-  <div class="plans-intro"><h1 class="page-title" style="font-size:clamp(37px,5vw,62px)">Choose your <em>plan</em></h1><p>Pick a duration that works for you. Plan duration, price and currency are loaded directly from your subscription database.</p></div>
+<section class="home-hero">
+  <p class="eyebrow" style="text-align:center">CODECINDEX · MANAGED STREAMING</p>
+  <div class="plans-intro"><h1 class="page-title" style="font-size:clamp(39px,6vw,72px)">Your media.<br><em>Your library.</em></h1><p>Stream your Telegram media through a compatible player without managing your own server or downloading complete files first.</p></div>
+  <div class="home-actions">{% if purchase_url %}<a class="btn btn-gold" href="{{ purchase_url }}" target="_blank" rel="noopener noreferrer">Activate through Telegram ↗</a>{% endif %}<a class="btn" href="/library">Explore public library</a></div>
+</section>
+<section class="section" id="plans">
+  <div class="section-head"><h2>Choose your plan</h2><span class="label">LIVE PRICING FROM SUBSCRIPTION DATABASE</span></div>
   {% if plans %}<div class="plans-grid">
     {% for plan in plans %}<article class="plan-card">
       <div class="plan-name">{{ plan.name }}</div><div class="plan-days">{{ plan.days }} days of access</div>
       <div class="plan-price">{% if plan.currency == 'INR' %}₹{% elif plan.currency == 'USD' %}${% elif plan.currency == 'EUR' %}€{% elif plan.currency == 'GBP' %}£{% elif plan.currency == 'AED' %}د.إ{% else %}{{ plan.currency }} {% endif %}{{ '%.2f'|format(plan.price) if plan.price % 1 else '%.0f'|format(plan.price) }}</div>
       <div class="plan-currency">{{ plan.currency }} · VALID FOR {{ plan.days }} DAYS</div>
       <ul class="plan-points">
-        <li>Movies and TV series library access</li>
-        {% if plan.daily_limit_gb %}<li>Daily usage allowance: {{ plan.daily_limit_gb }} GB</li>{% endif %}
-        <li>Unlimited monthly data, subject to daily usage cap</li>
-        <li>Direct streaming on supported compatible devices</li>
+        <li>Daily usage: {% if plan.daily_cap_gb == 'Unlimited' %}Unlimited{% elif plan.daily_cap_gb is not none %}{{ plan.daily_cap_gb }} GB{% else %}Not specified{% endif %}</li>
+        <li>Monthly usage: {% if plan.monthly_cap == 'Unlimited' %}Unlimited{% else %}{{ plan.monthly_cap }} GB{% endif %}</li>
+        <li>Managed media library access</li>
+        <li>Streaming through compatible players</li>
       </ul>
-      {% if purchase_url %}<a class="btn btn-gold" href="{{ purchase_url }}" target="_blank" rel="noopener noreferrer">Get {{ plan.name }} ↗</a>{% else %}<span class="btn" style="opacity:.6;text-align:center">Purchase bot not configured</span>{% endif %}
+      {% if purchase_url %}<a class="btn btn-gold" href="{{ purchase_url }}" target="_blank" rel="noopener noreferrer">Choose {{ plan.name }} ↗</a>{% else %}<span class="btn" style="opacity:.6;text-align:center">Purchase bot not configured</span>{% endif %}
     </article>{% endfor %}
   </div>
   {% else %}<div class="empty-state">Subscription plans are not available right now. Please check back later.</div>{% endif %}
+</section>
+<section class="section home-features">
+  <div class="section-head"><h2>Streaming, without server management</h2><span class="label">WHAT'S INCLUDED</span></div>
+  <div class="feature-grid">
+    <article class="feature-card"><span>01</span><h3>Direct streaming</h3><p>Play supported Telegram media without first downloading the entire file.</p></article>
+    <article class="feature-card"><span>02</span><h3>Organized library</h3><p>Browse movies, TV shows, seasons and episodes with artwork and metadata.</p></article>
+    <article class="feature-card"><span>03</span><h3>Multi-device access</h3><p>Use supported Android, Android TV, Fire TV, desktop and compatible player setups.</p></article>
+    <article class="feature-card"><span>04</span><h3>Managed hosting</h3><p>No personal VPS, Docker installation or server administration is required.</p></article>
+  </div>
+</section>
+<section class="section">
+  <div class="section-head"><h2>How it works</h2><span class="label">THREE SIMPLE STEPS</span></div>
+  <div class="steps-grid"><article><b>01</b><h3>Choose a plan</h3><p>Select the duration and usage limits that suit your needs.</p></article><article><b>02</b><h3>Activate in Telegram</h3><p>Continue to the official bot and follow its payment and verification instructions.</p></article><article><b>03</b><h3>Connect your player</h3><p>Use the private addon configuration provided after activation in a compatible player.</p></article></div>
+</section>
+<section class="section faq-section">
+  <div class="section-head"><h2>Questions, answered</h2><span class="label">HELP & INFORMATION</span></div>
+  <div class="faq-list">{% for question, answer in faqs %}<details class="faq-item"><summary>{{ question }}<span>＋</span></summary><p>{{ answer }}</p></details>{% endfor %}</div>
+</section>
+<section class="section policy-note">
+  <h2>Fair and private use</h2>
+  <p>One access token is intended for one user. Keep your token private. Usage limits and subscription validity are determined by the plan shown above and the service's active configuration.</p>
+  {% if support_url %}<a class="btn" href="{{ support_url }}" target="_blank" rel="noopener noreferrer">Contact support ↗</a>{% endif %}
 </section>
 {% endblock %}

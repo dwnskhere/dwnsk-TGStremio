@@ -305,8 +305,8 @@ async def open_in_app(app_name: str, media_type: str, content_id: str):
 #----- Public landing page
 @app.get("/", response_class=HTMLResponse)
 async def root(request: Request):
-    from Backend.fastapi.routes.public_site import public_library_page
-    return await public_library_page(request)
+    from Backend.fastapi.routes.public_site import public_plans_page
+    return await public_plans_page(request)
 
 #----- Protected routes (authentication required)
 @app.get("/admin", response_class=HTMLResponse)
@@ -413,6 +413,10 @@ async def clear_analytics(_: bool = Depends(require_auth)):
 
 @app.get("/admin/subscriptions", response_class=HTMLResponse)
 async def admin_subscriptions(request: Request, _: bool = Depends(require_auth)):
+    return await admin_subscriptions_page(request, _)
+
+@app.get("/admin/plans", response_class=HTMLResponse)
+async def admin_plans_alias(request: Request, _: bool = Depends(require_auth)):
     return await admin_subscriptions_page(request, _)
 
 @app.get("/api/admin/subscriptions/plans")

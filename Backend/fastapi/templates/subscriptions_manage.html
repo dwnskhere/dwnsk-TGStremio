@@ -516,13 +516,25 @@
             <input type="hidden" id="plan-id">
 
             <div class="modal-field">
-                <label for="plan-days">Duration (Days)</label>
-                <input type="number" id="plan-days" class="glass-input" required min="1">
+                <label for="plan-name">Plan Name</label>
+                <input type="text" id="plan-name" class="glass-input" required maxlength="80" placeholder="e.g. HD Plus">
+            </div>
+            <div class="modal-field">
+                <label for="plan-days">Validity (Days)</label>
+                <input type="number" id="plan-days" class="glass-input" required min="1" max="3650">
             </div>
 
             <div class="modal-field">
                 <label for="plan-price">Price</label>
                 <input type="number" id="plan-price" class="glass-input" required min="0" step="0.01">
+            </div>
+            <div class="modal-field">
+                <label for="plan-daily-cap">Daily Cap (GB)</label>
+                <input type="text" id="plan-daily-cap" class="glass-input" required placeholder="e.g. 50 or Unlimited">
+            </div>
+            <div class="modal-field">
+                <label for="plan-monthly-cap">Monthly Cap (GB)</label>
+                <input type="text" id="plan-monthly-cap" class="glass-input" required placeholder="e.g. 1000 or Unlimited">
             </div>
             <div>
                 <label for="plan-currency">Currency</label>
@@ -652,35 +664,27 @@
             container.innerHTML = plans.map(p => `
                 <div class="plan-card p-5 sm:p-6">
                     <div class="plan-actions absolute right-4 top-4 flex gap-2">
-                        <button onclick="openPlanModal('${p._id}', ${p.days}, ${p.price}, '${p.currency || 'INR'}')"
+                        <button data-edit-plan="${escapeHtml(JSON.stringify(p))}"
                             class="glass-btn rounded-full w-9 h-9 flex items-center justify-center" title="Edit plan">
                             <i class="fas fa-pen text-sm"></i>
                         </button>
-                        <button onclick="deletePlan('${p._id}')"
+                        <button data-delete-plan="${escapeHtml(p._id)}"
                             class="glass-btn glass-btn-danger rounded-full w-9 h-9 flex items-center justify-center" title="Delete plan">
                             <i class="fas fa-trash text-sm"></i>
                         </button>
                     </div>
-
-                    <div class="flex items-start gap-4">
-                        <div class="w-14 h-14 rounded-2xl flex items-center justify-center shrink-0"
-                             style="background: color-mix(in srgb, var(--primary) 16%, transparent); border: 1px solid color-mix(in srgb, var(--primary) 24%, transparent);">
-                            <i class="fas fa-calendar-alt text-xl" style="color: var(--primary);"></i>
-                        </div>
-
-                        <div class="min-w-0">
-                            <div class="text-sm font-semibold section-muted">${p.days} Days Plan</div>
-                            <div class="mt-1 text-3xl font-extrabold section-title tracking-tight">${currencySymbol(p.currency)}${p.price}</div>
-                    <div class="text-xs text-soft mt-0.5">${(p.currency || 'INR').toUpperCase()}</div>
-                            <div class="mt-3 inline-flex items-center gap-2 text-xs font-bold rounded-full px-3 py-1"
-                                 style="background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--text-sec); border: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);">
-                                <i class="fas fa-bolt" style="color: var(--accent);"></i>
-                                Premium Access
-                            </div>
-                        </div>
+                    <div class="text-xl font-bold section-title pr-20">${escapeHtml(p.name || 'Subscription Plan')}</div>
+                    <div class="text-xs section-muted mt-1">${Number(p.days)} days validity</div>
+                    <div class="mt-3 text-3xl font-extrabold section-title tracking-tight">${currencySymbol(p.currency)}${Number(p.price).toLocaleString(undefined,{maximumFractionDigits:2})}</div>
+                    <div class="text-xs text-soft mt-0.5">${escapeHtml((p.currency || 'INR').toUpperCase())}</div>
+                    <div class="mt-4 grid grid-cols-2 gap-3 text-sm">
+                        <div class="rounded-xl p-3" style="background:var(--surface,rgba(255,255,255,.04))"><div class="text-xs text-soft">Daily Cap</div><strong>${formatPlanCap(p.daily_cap_gb)}</strong></div>
+                        <div class="rounded-xl p-3" style="background:var(--surface,rgba(255,255,255,.04))"><div class="text-xs text-soft">Monthly Cap</div><strong>${formatPlanCap(p.monthly_cap)}</strong></div>
                     </div>
                 </div>
             `).join('');
+            container.querySelectorAll('[data-edit-plan]').forEach(btn => btn.addEventListener('click', () => openPlanModal(JSON.parse(btn.dataset.editPlan))));
+            container.querySelectorAll('[data-delete-plan]').forEach(btn => btn.addEventListener('click', () => deletePlan(btn.dataset.deletePlan)));
         } catch (err) {
             console.error(err);
             container.innerHTML = `
@@ -696,12 +700,23 @@
         return map[(code || 'INR').toUpperCase()] || ((code || 'INR') + ' ');
     }
 
-    function openPlanModal(id = '', days = '', price = '', currency = 'INR') {
+    function escapeHtml(value) {
+        return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+    function formatPlanCap(value) {
+        if (value === null || value === undefined || value === '') return 'Not set';
+        return String(value).toLowerCase() === 'unlimited' ? 'Unlimited' : `${Number(value).toLocaleString()} GB`;
+    }
+    function openPlanModal(plan = null) {
+        const id = plan?._id || '';
         document.getElementById('plan-id').value = id;
-        document.getElementById('plan-days').value = days;
-        document.getElementById('plan-price').value = price;
+        document.getElementById('plan-name').value = plan?.name || '';
+        document.getElementById('plan-days').value = plan?.days ?? '';
+        document.getElementById('plan-price').value = plan?.price ?? '';
+        document.getElementById('plan-daily-cap').value = plan?.daily_cap_gb ?? '';
+        document.getElementById('plan-monthly-cap').value = plan?.monthly_cap ?? 'Unlimited';
         const cur = document.getElementById('plan-currency');
-        if (cur) cur.value = (currency || 'INR').toUpperCase();
+        if (cur) cur.value = (plan?.currency || 'INR').toUpperCase();
         document.getElementById('plan-modal-title').innerText = id ? 'Edit Plan' : 'Add New Plan';
 
         const modal = document.getElementById('plan-modal');
@@ -722,9 +737,12 @@
 
         const id = document.getElementById('plan-id').value;
         const payload = {
+            name: document.getElementById('plan-name').value.trim(),
             days: parseInt(document.getElementById('plan-days').value),
             price: parseFloat(document.getElementById('plan-price').value),
-            currency: (document.getElementById('plan-currency') || {}).value || 'INR'
+            currency: (document.getElementById('plan-currency') || {}).value || 'INR',
+            daily_cap_gb: document.getElementById('plan-daily-cap').value.trim(),
+            monthly_cap: document.getElementById('plan-monthly-cap').value.trim()
         };
 
         try {

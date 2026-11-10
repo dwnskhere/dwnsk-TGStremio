@@ -8,8 +8,13 @@ never leave this module.
 from __future__ import annotations
 
 import asyncio
+import copy
+import hashlib
+import json
 import re
 import time
+from collections import OrderedDict
+from threading import RLock
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -30,15 +35,45 @@ except Exception:  # Keep the public catalogue usable if optional parser deps fa
 router = APIRouter()
 templates = Jinja2Templates(directory="Backend/fastapi/templates")
 
-# V1 display allowances from the operator-provided current plan copy. The plan
-# duration/price/currency itself always comes from tracking.sub_plans. These
-# daily caps are deliberately a manual display mapping until the plan schema
-# gains explicit entitlements in a later release.
-_MANUAL_DAILY_LIMITS_GB = {30: 50, 90: 70, 180: 98, 365: 137}
-_PLAN_LABELS = {30: "Starter", 90: "Basic", 180: "Pro", 365: "Premium"}
+# Public catalogue responses are cached in application memory (never in MongoDB).
+# The 24-hour TTL is a safety ceiling; application write paths invalidate the
+# cache immediately after media mutations. This deployment runs one web process.
+_PUBLIC_CACHE_TTL = 24 * 60 * 60
+_PUBLIC_CACHE_MAX = 512
+_PUBLIC_CACHE: OrderedDict[str, tuple[float, Any]] = OrderedDict()
+_PUBLIC_CACHE_LOCK = RLock()
 _PUBLIC_LIST_MAX_CANDIDATES = 30_000  # page<=500 and page_size<=60
 _STATS_CACHE: dict[str, Any] = {"at": 0.0, "value": None}
 _STATS_LOCK = asyncio.Lock()
+
+
+def invalidate_public_cache() -> None:
+    """Invalidate all in-process public read-model data after a backing write."""
+    with _PUBLIC_CACHE_LOCK:
+        _PUBLIC_CACHE.clear()
+    _STATS_CACHE.update({"at": 0.0, "value": None})
+
+
+def _public_cache_get(key: str):
+    now = time.monotonic()
+    with _PUBLIC_CACHE_LOCK:
+        entry = _PUBLIC_CACHE.get(key)
+        if not entry:
+            return None
+        expires_at, value = entry
+        if expires_at <= now:
+            _PUBLIC_CACHE.pop(key, None)
+            return None
+        _PUBLIC_CACHE.move_to_end(key)
+        return copy.deepcopy(value)
+
+
+def _public_cache_set(key: str, value: Any) -> None:
+    with _PUBLIC_CACHE_LOCK:
+        _PUBLIC_CACHE[key] = (time.monotonic() + _PUBLIC_CACHE_TTL, copy.deepcopy(value))
+        _PUBLIC_CACHE.move_to_end(key)
+        while len(_PUBLIC_CACHE) > _PUBLIC_CACHE_MAX:
+            _PUBLIC_CACHE.popitem(last=False)
 
 _PUBLIC_VISIBILITY = {
     "$or": [
@@ -68,27 +103,15 @@ _ACTIVE_TV = {
 _LIST_PROJECTION = {
     "_id": 0,
     "tmdb_id": 1,
-    "imdb_id": 1,
     "title": 1,
-    "title_english": 1,
-    "original_title": 1,
     "release_year": 1,
-    "release_year_end": 1,
-    "rating": 1,
-    "genres": 1,
+    "rating": 1,  # internal sort only; never included in the public card payload.
     "poster": 1,
-    "backdrop": 1,
-    "description": 1,
     "updated_on": 1,
-    "is_anime": 1,
-    "telegram.quality": 1,
-    "telegram.name": 1,
     "telegram.is_dead": 1,
     "seasons.season_number": 1,
     "seasons.episodes.episode_number": 1,
     "seasons.episodes.indexed_on": 1,
-    "seasons.episodes.telegram.quality": 1,
-    "seasons.episodes.telegram.name": 1,
     "seasons.episodes.telegram.is_dead": 1,
 }
 
@@ -97,8 +120,7 @@ _DETAIL_MOVIE_PROJECTION = {
     "tmdb_id": 1, "title": 1, "title_english": 1, "original_title": 1,
     "release_year": 1, "release_year_end": 1, "rating": 1, "genres": 1,
     "poster": 1, "backdrop": 1, "logo": 1, "description": 1, "runtime": 1,
-    "telegram.quality": 1, "telegram.size": 1, "telegram.name": 1,
-    "telegram.is_dead": 1, "telegram.parts.part_number": 1,
+    "telegram.is_dead": 1,
 }
 _DETAIL_TV_PROJECTION = {
     "_id": 0,
@@ -109,9 +131,7 @@ _DETAIL_TV_PROJECTION = {
     "seasons.episodes.title": 1, "seasons.episodes.overview": 1,
     "seasons.episodes.episode_backdrop": 1, "seasons.episodes.released": 1,
     "seasons.episodes.indexed_on": 1,
-    "seasons.episodes.telegram.quality": 1, "seasons.episodes.telegram.size": 1,
-    "seasons.episodes.telegram.name": 1, "seasons.episodes.telegram.is_dead": 1,
-    "seasons.episodes.telegram.parts.part_number": 1,
+    "seasons.episodes.telegram.is_dead": 1,
 }
 
 
@@ -188,16 +208,29 @@ def _public_plan_record(plan: dict) -> dict | None:
     if days <= 0 or price < 0:
         return None
     currency = re.sub(r"[^A-Z]", "", str(plan.get("currency") or "INR").upper())[:3] or "INR"
-    name = str(plan.get("name") or plan.get("title") or "").strip()[:80]
-    if not name:
-        name = _PLAN_LABELS.get(days, f"{days}-Day Plan")
+    name = str(plan.get("name") or plan.get("title") or f"{days}-Day Plan").strip()[:80]
+    legacy_daily_caps = {30: 50, 90: 70, 180: 98, 365: 137}
+    daily_cap = plan.get("daily_cap_gb", legacy_daily_caps.get(days))
+    if daily_cap is None and "daily_cap_gb" not in plan:
+        daily_cap = legacy_daily_caps.get(days)
+    monthly_cap = plan.get("monthly_cap", "Unlimited")
+    if daily_cap is not None and str(daily_cap).strip().casefold() != "unlimited":
+        daily_cap = _safe_number(daily_cap, default=-1)
+        daily_cap = daily_cap if daily_cap >= 0 else None
+    elif daily_cap is not None:
+        daily_cap = "Unlimited"
+    if monthly_cap is None or str(monthly_cap).strip().casefold() in {"", "unlimited"}:
+        monthly_cap = "Unlimited"
+    else:
+        monthly_cap = _safe_number(monthly_cap, default=-1)
+        monthly_cap = monthly_cap if monthly_cap >= 0 else "Unlimited"
     return {
         "name": name,
         "days": days,
         "price": price,
         "currency": currency,
-        "daily_limit_gb": _MANUAL_DAILY_LIMITS_GB.get(days),
-        "monthly_data": "Unlimited",
+        "daily_cap_gb": daily_cap,
+        "monthly_cap": monthly_cap,
     }
 
 
@@ -236,69 +269,34 @@ def _is_recent_episode(episode: dict, cutoff: datetime) -> bool:
 
 
 def _card(doc: dict, media_type: str) -> dict | None:
-    has_4k = False
+    """Safe, minimal public catalogue card: media name and year only."""
     if media_type == "movie":
-        items = _active_items(doc.get("telegram"))
-        if not items:
+        if not _active_items(doc.get("telegram")):
             return None
-        labels = _quality_labels(items)
-        file_count = len(labels)  # Q10-C: distinct quality labels per title.
-        has_4k = _is_4k(items)
         is_new = False
-        seasons_count = 0
-        episode_count = 0
     else:
-        seasons = doc.get("seasons") or []
         active_episodes = []
-        new_episode_found = False
         cutoff = datetime.utcnow() - timedelta(days=14)
-        file_count = 0
-        labels_set = set()
-        for season in seasons:
-            for episode in (season.get("episodes") or []):
-                active = _active_items(episode.get("telegram"))
-                if not active:
+        is_new = False
+        for season in doc.get("seasons") or []:
+            for episode in season.get("episodes") or []:
+                if not _active_items(episode.get("telegram")):
                     continue
                 active_episodes.append(episode)
-                episode_labels = _quality_labels(active)
-                file_count += len(episode_labels)  # distinct qualities per episode.
-                labels_set.update(episode_labels)
-                has_4k = has_4k or _is_4k(active)
                 if _is_recent_episode(episode, cutoff):
-                    new_episode_found = True
+                    is_new = True
         if not active_episodes:
             return None
-        labels = sorted(labels_set, key=lambda value: (
-            0, int(re.search(r"\d+", value).group()) if re.search(r"\d+", value) else 99999, value.casefold()
-        ))
-        is_new = new_episode_found
-        seasons_count = sum(
-            1 for season in seasons
-            if any(_active_items(ep.get("telegram")) for ep in (season.get("episodes") or []))
-        )
-        episode_count = len(active_episodes)
-
-    poster = resolve_cover_url(doc.get("poster") or "")
-    backdrop = resolve_cover_url(doc.get("backdrop") or "")
+    year = doc.get("release_year")
     return {
         "tmdb_id": doc.get("tmdb_id"),
         "media_type": media_type,
-        "title": doc.get("title") or doc.get("title_english") or "Untitled",
-        "year": doc.get("release_year"),
-        "year_end": doc.get("release_year_end"),
-        "rating": doc.get("rating"),
-        "genres": list(doc.get("genres") or [])[:5],
-        "poster": poster,
-        "backdrop": backdrop,
-        "quality_labels": labels,
-        "file_count": file_count,
-        "season_count": seasons_count,
-        "episode_count": episode_count,
+        "title": str(doc.get("title") or doc.get("title_english") or "Untitled")[:180],
+        "year": year,
+        "poster": resolve_cover_url(doc.get("poster") or ""),
         "is_new": is_new,
-        "is_anime": bool(doc.get("is_anime")),
-        # Internal sort/filter fields are removed before returning API JSON.
         "_sort_ts": _safe_timestamp(doc.get("updated_on")),
-        "_has_4k": has_4k,
+        "_rating": _safe_number(doc.get("rating")),
     }
 
 
@@ -340,9 +338,6 @@ def _safe_detail(doc: dict, media_type: str) -> dict:
         "runtime": str(doc.get("runtime") or "")[:80],
     }
     if media_type == "movie":
-        files = [_public_file_info(item) for item in _active_items(doc.get("telegram"))]
-        base["files"] = files
-        base["file_count"] = len(_quality_labels(doc.get("telegram")))
         return base
 
     seasons_out = []
@@ -358,9 +353,6 @@ def _safe_detail(doc: dict, media_type: str) -> dict:
                 "overview": str(episode.get("overview") or "")[:2500],
                 "released": str(episode.get("released") or "")[:40],
                 "backdrop": resolve_cover_url(episode.get("episode_backdrop") or ""),
-                "files": [_public_file_info(item) for item in active],
-                "quality_labels": _quality_labels(active),
-                "file_count": len(_quality_labels(active)),
             })
         if eps_out:
             seasons_out.append({"season_number": season.get("season_number"), "episodes": eps_out})
@@ -396,7 +388,7 @@ def _public_links() -> dict:
     return {"purchase_url": purchase, "support_url": support}
 
 
-async def _get_public_document(media_type: str, tmdb_id: int) -> dict | None:
+async def _get_public_document_uncached(media_type: str, tmdb_id: int) -> dict | None:
     """Resolve the newest stored copy first, then enforce public visibility.
 
     Do not query for `visibility=public` while walking backwards through storage
@@ -427,6 +419,16 @@ async def _get_public_document(media_type: str, tmdb_id: int) -> dict | None:
                 return None
         return doc
     return None
+
+
+async def _get_public_document(media_type: str, tmdb_id: int) -> dict | None:
+    key = f"detail:{media_type}:{int(tmdb_id)}"
+    cached = _public_cache_get(key)
+    if cached is not None:
+        return cached or None
+    value = await _get_public_document_uncached(media_type, tmdb_id)
+    _public_cache_set(key, value if value is not None else {})
+    return value
 
 
 def _search_clause(q: str) -> dict:
@@ -464,7 +466,7 @@ def _filter_clause(media_type: str, filter_name: str) -> dict:
     return {}
 
 
-async def _load_list_page(
+async def _load_list_page_uncached(
     collection: str, media_type: str, query: dict, page: int, page_size: int, sort: str, filter_name: str
 ) -> tuple[list[dict], int]:
     """Fetch enough top candidates from every storage DB for a global mixed sort.
@@ -495,44 +497,42 @@ async def _load_list_page(
         card = _card(doc, media_type)
         if card is None:
             continue
-        if filter_name == "4k" and not card.get("_has_4k"):
-            continue
         cards.append(card)
     return cards, total
 
 
+async def _load_list_page(
+    collection: str, media_type: str, query: dict, page: int, page_size: int, sort: str, filter_name: str
+) -> tuple[list[dict], int]:
+    # Cache only the final safe API page below, not the large per-storage
+    # candidate lists. This keeps memory usage proportional to requested pages.
+    return await _load_list_page_uncached(collection, media_type, query, page, page_size, sort, filter_name)
+
 
 async def _public_stats() -> dict:
     now = time.monotonic()
-    if _STATS_CACHE["value"] is not None and now - _STATS_CACHE["at"] < 90:
+    if _STATS_CACHE["value"] is not None and now - _STATS_CACHE["at"] < _PUBLIC_CACHE_TTL:
         return _STATS_CACHE["value"]
     async with _STATS_LOCK:
         now = time.monotonic()
-        if _STATS_CACHE["value"] is not None and now - _STATS_CACHE["at"] < 90:
+        if _STATS_CACHE["value"] is not None and now - _STATS_CACHE["at"] < _PUBLIC_CACHE_TTL:
             return _STATS_CACHE["value"]
-        stats = {"movies": 0, "movie_files": 0, "tv_shows": 0, "episode_files": 0, "episodes": 0}
+        stats = {"movies": 0, "tv_shows": 0, "episodes": 0}
         for _, storage in _storage_items():
             movie_query = _query(_PUBLIC_VISIBILITY, _PUBLIC_CATALOG, _ACTIVE_MOVIE)
             tv_query = _query(_PUBLIC_VISIBILITY, _PUBLIC_CATALOG, _ACTIVE_TV)
-            movies = storage["movie"].find(movie_query, {"telegram.quality": 1, "telegram.is_dead": 1})
-            async for doc in movies:
-                labels = _quality_labels(doc.get("telegram"))
-                if labels:
-                    stats["movies"] += 1
-                    stats["movie_files"] += len(labels)
+            stats["movies"] += await storage["movie"].count_documents(movie_query)
             shows = storage["tv"].find(tv_query, {
-                "seasons.episodes.telegram.quality": 1,
                 "seasons.episodes.telegram.is_dead": 1,
+                "visibility": 1, "exclusive_catalog_id": 1,
             })
             async for doc in shows:
                 has_active = False
                 for season in doc.get("seasons") or []:
                     for episode in season.get("episodes") or []:
-                        labels = _quality_labels(episode.get("telegram"))
-                        if labels:
+                        if _active_items(episode.get("telegram")):
                             has_active = True
                             stats["episodes"] += 1
-                            stats["episode_files"] += len(labels)
                 if has_active:
                     stats["tv_shows"] += 1
         _STATS_CACHE.update({"at": time.monotonic(), "value": stats})
@@ -562,6 +562,15 @@ async def public_plans_page(request: Request):
     return templates.TemplateResponse("public_plans.html", {
         "request": request,
         "plans": clean_plans,
+        "faqs": [
+            ("How do I activate a plan?", "Choose a plan and continue to the configured Telegram activation bot. Follow the bot's instructions to complete the purchase and activation."),
+            ("What happens after I submit payment details?", "The payment is reviewed by the service team. Access is activated after successful verification."),
+            ("How do daily and monthly caps work?", "The limits shown on each plan are the limits configured by the administrator. Daily usage resets according to the service's configured reset schedule; monthly usage follows the plan's monthly cap."),
+            ("Can I share my access token?", "No. One access token is intended for one user. Keep your token private and do not resell or redistribute access."),
+            ("Which devices are supported?", "The service is intended for compatible Android devices, Android TV, Fire TV, desktop systems and supported media players. Compatibility depends on the device and player."),
+            ("What if I reach my daily limit?", "Streaming access may pause until the next daily reset, according to the selected plan's configured limits."),
+            ("How can I get help?", "Use the Support link configured by the administrator on this website."),
+        ],
         **_public_links(),
     })
 
@@ -592,12 +601,19 @@ async def public_tv_page(request: Request, tmdb_id: int):
 async def public_library_api(
     q: str = Query("", max_length=80),
     media_type: str = Query("all", pattern="^(all|movie|tv)$"),
-    filter_by: str = Query("all", alias="filter", pattern="^(all|4k|new)$"),
+    filter_by: str = Query("all", alias="filter", pattern="^(all|new)$"),
     sort: str = Query("recent", pattern="^(recent|title|rating)$"),
     page: int = Query(1, ge=1, le=500),
     page_size: int = Query(24, ge=1, le=60),
 ):
     try:
+        cache_payload = [str(q or "").strip(), media_type, filter_by, sort, page, page_size]
+        cache_digest = hashlib.sha256(json.dumps(cache_payload, separators=(",", ":")).encode()).hexdigest()
+        cache_key = f"public-library-response:{cache_digest}"
+        cached_response = _public_cache_get(cache_key)
+        if cached_response is not None:
+            return JSONResponse(cached_response, headers={"Cache-Control": "public, max-age=0, must-revalidate"})
+
         public_query = _query(_PUBLIC_VISIBILITY, _PUBLIC_CATALOG)
         search = _search_clause(q)
         results = []
@@ -613,22 +629,25 @@ async def public_library_api(
         if sort == "title":
             results.sort(key=lambda x: (str(x.get("title") or "").casefold(), x.get("media_type") or ""))
         elif sort == "rating":
-            results.sort(key=lambda x: (_safe_number(x.get("rating")), str(x.get("title") or "").casefold()), reverse=True)
+            results.sort(key=lambda x: (x.get("_rating", 0), str(x.get("title") or "").casefold()), reverse=True)
         else:
             results.sort(key=lambda x: (x.get("_sort_ts", 0), str(x.get("title") or "").casefold()), reverse=True)
         page_results = results[(page - 1) * page_size:page * page_size]
         for item in page_results:
             item.pop("_sort_ts", None)
             item.pop("_has_4k", None)
+            item.pop("_rating", None)
         stats = await _public_stats()
-        return JSONResponse({
+        response_payload = {
             "items": page_results,
             "total": total,
             "page": page,
             "page_size": page_size,
             "pages": (total + page_size - 1) // page_size,
             "stats": stats,
-        }, headers={"Cache-Control": "public, max-age=20"})
+        }
+        _public_cache_set(cache_key, response_payload)
+        return JSONResponse(response_payload, headers={"Cache-Control": "public, max-age=0, must-revalidate"})
     except Exception as exc:
         LOGGER.error(f"Public library API failed: {exc}")
         raise HTTPException(status_code=500, detail="Could not load the public library")
@@ -639,7 +658,7 @@ async def public_plans_api():
     try:
         plans = await db.get_subscription_plans()
         cleaned = [public_plan for plan in plans if (public_plan := _public_plan_record(plan))]
-        return JSONResponse({"plans": cleaned}, headers={"Cache-Control": "public, max-age=60"})
+        return JSONResponse({"plans": cleaned}, headers={"Cache-Control": "public, max-age=0, must-revalidate"})
     except Exception as exc:
         LOGGER.error(f"Public plans API failed: {exc}")
         raise HTTPException(status_code=500, detail="Could not load subscription plans")
@@ -652,4 +671,4 @@ async def public_detail_api(media_type: str, tmdb_id: int):
     doc = await _get_public_document(media_type, tmdb_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Title not found")
-    return JSONResponse(_safe_detail(doc, media_type), headers={"Cache-Control": "public, max-age=30"})
+    return JSONResponse(_safe_detail(doc, media_type), headers={"Cache-Control": "public, max-age=0, must-revalidate"})

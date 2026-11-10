@@ -1,7 +1,7 @@
 {% extends "public_base.html" %}
 {% block title %}{{ media.title }} — CodecIndex{% endblock %}
 {% block content %}
-<a href="/" class="eyebrow">← BACK TO LIBRARY</a>
+<a href="/library" id="back-to-library" class="eyebrow">← BACK TO LIBRARY</a>
 <section class="detail-hero">
   {% if media.backdrop %}<img class="detail-backdrop" src="{{ media.backdrop }}" alt="" loading="lazy">{% endif %}
   {% if media.poster %}<img class="detail-poster" src="{{ media.poster }}" alt="{{ media.title }} poster">{% else %}<div class="detail-poster poster-placeholder">{{ media.title }}</div>{% endif %}
@@ -9,31 +9,24 @@
     <p class="eyebrow">{{ 'MOVIE' if is_movie else 'TELEVISION SERIES' }}{% if media.year %} · {{ media.year }}{% if media.year_end and media.year_end != media.year %}–{{ media.year_end }}{% endif %}{% endif %}</p>
     <h1>{{ media.title }}</h1>
     <div class="detail-kv">
-      {% if media.rating %}<span>★ {{ media.rating }}</span>{% endif %}
-      {% if media.runtime %}<span>{{ media.runtime }}</span>{% endif %}
       {% if media.genres %}<span>{{ media.genres|join(' · ') }}</span>{% endif %}
-      {% if not is_movie %}<span>{{ media.season_count }} seasons · {{ media.episode_count }} episodes</span>{% else %}<span>{{ media.file_count }} distinct qualities</span>{% endif %}
+      {% if media.runtime %}<span>{{ media.runtime }}</span>{% endif %}
     </div>
     {% if media.original_title and media.original_title != media.title %}<p class="muted" style="margin:13px 0 0;font-size:11px">Original name: {{ media.original_title }}</p>{% endif %}
   </div>
 </section>
 {% if media.overview %}<section class="section"><div class="section-head"><h2>Overview</h2><span class="label">ABOUT THIS TITLE</span></div><p class="overview">{{ media.overview }}</p></section>{% endif %}
-{% if is_movie %}
-<section class="section"><div class="section-head"><h2>Available versions</h2><span class="label">{{ media.file_count }} DISTINCT QUALITY LABELS</span></div>
-  {% if media.files %}<div class="file-scroll"><table class="file-table"><thead><tr><th>Resolution</th><th>Source</th><th>Codec</th><th>Video / HDR</th><th>Audio</th><th>Languages</th><th>Container</th><th>Size</th><th>Parts</th></tr></thead><tbody>{% for f in media.files %}<tr><td><strong>{{ f.quality }}</strong></td><td>{{ f.source }}</td><td>{{ f.codec }}</td><td>{{ f.video }}</td><td>{{ f.audio }}</td><td>{{ f.languages|join(', ') if f.languages else '—' }}</td><td>{{ f.container }}</td><td>{{ f.size }}</td><td>{{ f.parts_count }}</td></tr>{% endfor %}</tbody></table></div>{% else %}<p class="muted">No active versions are currently listed.</p>{% endif %}
-</section>
-{% else %}
-<section class="section"><div class="section-head"><h2>Seasons & episodes</h2><span class="label">BROWSE AVAILABLE EPISODES</span></div>
-  <div class="season-tabs" id="season-tabs">{% for season in media.seasons %}<button class="season-tab {% if loop.first %}active{% endif %}" data-season="{{ season.season_number }}">Season {{ season.season_number }} <span class="soft">· {{ season.episodes|length }}</span></button>{% endfor %}</div>
+{% if not is_movie %}
+<section class="section"><div class="section-head"><h2>Seasons & episodes</h2><span class="label">EPISODE GUIDE</span></div>
+  <div class="season-tabs" id="season-tabs">{% for season in media.seasons %}<button class="season-tab {% if loop.first %}active{% endif %}" data-season="{{ season.season_number }}">Season {{ season.season_number }} <span class="soft">· {{ season.episodes|length }} episodes</span></button>{% endfor %}</div>
   {% for season in media.seasons %}<div class="season-content" data-season-content="{{ season.season_number }}" {% if not loop.first %}hidden{% endif %}><div class="episode-grid">{% for ep in season.episodes %}<article class="episode-card">
       {% if ep.backdrop %}<img class="episode-img" src="{{ ep.backdrop }}" alt="" loading="lazy">{% else %}<div class="episode-img"></div>{% endif %}
-      <div><h3>E{{ '%02d'|format(ep.episode_number or 0) }} · {{ ep.title }}</h3><div class="media-meta">{{ ep.released or 'Release date unavailable' }} · {{ ep.file_count }} qualities</div>{% if ep.overview %}<p style="margin-top:7px">{{ ep.overview }}</p>{% endif %}
-        <details><summary>Technical versions</summary><div class="file-scroll" style="margin-top:8px"><table class="file-table"><thead><tr><th>Quality</th><th>Source</th><th>Codec</th><th>Video / HDR</th><th>Audio</th><th>Language</th><th>Container</th><th>Size</th></tr></thead><tbody>{% for f in ep.files %}<tr><td>{{ f.quality }}</td><td>{{ f.source }}</td><td>{{ f.codec }}</td><td>{{ f.video }}</td><td>{{ f.audio }}</td><td>{{ f.languages|join(', ') if f.languages else '—' }}</td><td>{{ f.container }}</td><td>{{ f.size }}</td></tr>{% endfor %}</tbody></table></div></details>
-      </div>
+      <div class="episode-copy"><h3>E{{ '%02d'|format(ep.episode_number or 0) }} · {{ ep.title }}</h3>{% if ep.released %}<div class="media-meta">{{ ep.released }}</div>{% endif %}{% if ep.overview %}<p style="margin-top:7px">{{ ep.overview }}</p>{% endif %}</div>
     </article>{% endfor %}</div></div>{% endfor %}
 </section>
+{% endif %}
 <script>
+const backLink=document.getElementById('back-to-library'); if(backLink) backLink.addEventListener('click',e=>{ try { const ref=new URL(document.referrer); if(ref.origin===location.origin && ref.pathname.startsWith('/library') && sessionStorage.getItem('codecindex-public-library-state-v2')){ e.preventDefault(); history.back(); } } catch (_) {} });
 document.querySelectorAll('.season-tab').forEach(btn=>btn.addEventListener('click',()=>{document.querySelectorAll('.season-tab').forEach(x=>x.classList.toggle('active',x===btn));document.querySelectorAll('.season-content').forEach(x=>x.hidden=x.dataset.seasonContent!==btn.dataset.season);}));
 </script>
-{% endif %}
 {% endblock %}

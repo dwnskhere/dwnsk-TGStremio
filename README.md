@@ -1044,3 +1044,7 @@ If Telegram-Stremio is useful to you, you can support its development here:
 <sub>Want to help? Open an issue or a pull request.</sub>
 
 </div>
+
+### Public Website V2
+
+The public Plans homepage, public media Library, sanitized movie/TV information pages, admin plan editor, and 24-hour in-process public catalogue cache are documented in [`PUBLIC_WEBSITE_V2.md`](PUBLIC_WEBSITE_V2.md).

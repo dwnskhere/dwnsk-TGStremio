@@ -689,19 +689,60 @@ async def get_subscription_plans_api() -> dict:
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-async def add_subscription_plan_api(payload: dict) -> dict:
+def _normalize_plan_cap(value, field_name: str):
+    if value is None or str(value).strip() == "":
+        return None
+    raw = str(value).strip()
+    if raw.casefold() in {"unlimited", "no limit", "none"}:
+        return "Unlimited"
+    try:
+        amount = float(raw)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail=f"{field_name} must be a non-negative number of GB or Unlimited")
+    if amount < 0 or amount > 1_000_000:
+        raise HTTPException(status_code=400, detail=f"{field_name} must be between 0 and 1,000,000 GB")
+    return int(amount) if amount.is_integer() else amount
+
+
+def _plan_payload(payload: dict) -> dict:
+    name = str(payload.get("name") or "").strip()
+    if not name or len(name) > 80:
+        raise HTTPException(status_code=400, detail="Plan Name is required and must be 80 characters or fewer")
     try:
         days = int(payload.get("days", 0))
-        price = float(payload.get("price", 0.0))
-        currency = str(payload.get("currency") or "INR").upper().strip()
-        if days <= 0 or price < 0:
-            raise HTTPException(status_code=400, detail="Invalid plan parameters")
-            
-        plan_id = await db.add_subscription_plan(days, price, currency)
+        price = float(payload.get("price", -1))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Validity and Price must be valid numbers")
+    currency = str(payload.get("currency") or "INR").upper().strip()
+    if days <= 0 or days > 3650 or price < 0 or price > 1_000_000_000:
+        raise HTTPException(status_code=400, detail="Invalid plan validity or price")
+    if not re.fullmatch(r"[A-Z]{3}", currency):
+        raise HTTPException(status_code=400, detail="Currency must be a three-letter currency code")
+    daily_cap = _normalize_plan_cap(payload.get("daily_cap_gb"), "Daily Cap")
+    monthly_cap = _normalize_plan_cap(payload.get("monthly_cap"), "Monthly Cap")
+    return {
+        "name": name, "days": days, "price": price, "currency": currency,
+        "daily_cap_gb": daily_cap,
+        "monthly_cap": "Unlimited" if monthly_cap is None else monthly_cap,
+    }
+
+
+async def _invalidate_public_plan_cache():
+    try:
+        from Backend.fastapi.routes.public_site import invalidate_public_cache
+        invalidate_public_cache()
+    except Exception:
+        pass
+
+
+async def add_subscription_plan_api(payload: dict) -> dict:
+    try:
+        values = _plan_payload(payload)
+        plan_id = await db.add_subscription_plan(**values)
         if plan_id:
+            await _invalidate_public_plan_cache()
             return {"status": "success", "message": "Plan added successfully", "plan_id": plan_id}
-        else:
-            raise HTTPException(status_code=500, detail="Failed to add plan")
+        raise HTTPException(status_code=500, detail="Failed to add plan")
     except HTTPException:
         raise
     except Exception as e:
@@ -709,26 +750,22 @@ async def add_subscription_plan_api(payload: dict) -> dict:
 
 async def update_subscription_plan_api(plan_id: str, payload: dict) -> dict:
     try:
-        days = int(payload.get("days", 0))
-        price = float(payload.get("price", 0.0))
-        currency = str(payload.get("currency") or "INR").upper().strip()
-        if days <= 0 or price < 0:
-             raise HTTPException(status_code=400, detail="Invalid plan parameters")
-             
-        success = await db.update_subscription_plan(plan_id, days, price, currency)
+        values = _plan_payload(payload)
+        success = await db.update_subscription_plan(plan_id, **values)
         if success:
-             return {"status": "success", "message": "Plan updated successfully"}
-        else:
-             raise HTTPException(status_code=404, detail="Plan not found or update failed")
+            await _invalidate_public_plan_cache()
+            return {"status": "success", "message": "Plan updated successfully"}
+        raise HTTPException(status_code=404, detail="Plan not found or update failed")
     except HTTPException:
-         raise
+        raise
     except Exception as e:
-         raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
 
 async def delete_subscription_plan_api(plan_id: str) -> dict:
     try:
         success = await db.delete_subscription_plan(plan_id)
         if success:
+            await _invalidate_public_plan_cache()
             return {"status": "success", "message": "Plan deleted successfully"}
         else:
             raise HTTPException(status_code=404, detail="Plan not found")

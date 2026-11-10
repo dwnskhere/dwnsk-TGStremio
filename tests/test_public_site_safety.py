@@ -8,8 +8,13 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import copy
 import re
+import time
 import unittest
+from jinja2 import Environment
+from collections import OrderedDict
+from threading import RLock
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -20,6 +25,8 @@ WANTED = {
     "_parsed_name", "_is_4k", "_is_recent_episode", "_card", "_public_file_info",
     "_safe_detail", "_search_clause", "_safe_telegram_link",
     "_candidate_limit", "_public_plan_record", "_get_public_document",
+    "_get_public_document_uncached", "_public_cache_get", "_public_cache_set",
+    "invalidate_public_cache",
 }
 NODES = [
     node for node in TREE.body
@@ -49,8 +56,13 @@ NAMESPACE = {
     "parse_filename": parse_filename,
     "resolve_cover_url": lambda value: value or "",
     "_PUBLIC_LIST_MAX_CANDIDATES": 30_000,
-    "_PLAN_LABELS": {30: "Starter", 90: "Basic", 180: "Pro", 365: "Premium"},
-    "_MANUAL_DAILY_LIMITS_GB": {30: 50, 90: 70, 180: 98, 365: 137},
+    "_PUBLIC_CACHE": OrderedDict(),
+    "_PUBLIC_CACHE_LOCK": RLock(),
+    "_PUBLIC_CACHE_TTL": 86400,
+    "_PUBLIC_CACHE_MAX": 512,
+    "_STATS_CACHE": {"at": 0.0, "value": None},
+    "copy": copy,
+    "time": time,
     "_DETAIL_MOVIE_PROJECTION": {"tmdb_id": 1, "telegram.quality": 1},
     "_DETAIL_TV_PROJECTION": {"tmdb_id": 1, "seasons.episodes.telegram.quality": 1},
 }
@@ -173,7 +185,8 @@ class PublicSiteSafetyTests(unittest.TestCase):
         text = repr(safe)
         for forbidden in ("mongo-object-id", "imdb_id", "visibility", "Private.Filename", "internal-id", "chat_id", "msg_id"):
             self.assertNotIn(forbidden, text)
-        self.assertEqual(len(safe["files"]), 1)
+        self.assertNotIn("files", safe)
+        self.assertNotIn("quality", repr(safe))
 
     def test_dead_streams_are_not_returned(self):
         doc = {"tmdb_id": 1, "title": "Example", "telegram": [
@@ -181,22 +194,26 @@ class PublicSiteSafetyTests(unittest.TestCase):
             {"quality": "1080p", "is_dead": False, "name": "live.1080p.WEB-DL.mkv"},
         ]}
         safe = NAMESPACE["_safe_detail"](doc, "movie")
-        self.assertEqual(len(safe["files"]), 1)
-        self.assertEqual(safe["files"][0]["quality"], "1080p")
+        self.assertNotIn("files", safe)
+        self.assertNotIn("1080p", repr(safe))
 
-    def test_library_counts_distinct_quality_labels(self):
+    def test_library_card_exposes_only_name_year_poster_and_public_type(self):
         doc = {
-            "tmdb_id": 9, "title": "Example", "updated_on": datetime(2026, 11, 10),
+            "tmdb_id": 9, "title": "Example", "release_year": 2026,
+            "updated_on": datetime(2026, 11, 10),
+            "rating": 8.2,
             "telegram": [
-                {"quality": "1080p", "name": "one.1080p.WEB-DL.mkv", "is_dead": False},
-                {"quality": "1080p", "name": "two.1080p.WEB-DL.mkv", "is_dead": False},
-                {"quality": "720p", "name": "three.720p.WEB-DL.mkv", "is_dead": False},
+                {"quality": "1080p", "name": "Private.1080p.mkv", "is_dead": False},
             ],
         }
         card = NAMESPACE["_card"](doc, "movie")
-        self.assertEqual(card["file_count"], 2)
-        self.assertEqual(card["quality_labels"], ["720p", "1080p"])
+        self.assertEqual(card["title"], "Example")
+        self.assertEqual(card["year"], 2026)
+        self.assertEqual(card["media_type"], "movie")
         self.assertGreater(card["_sort_ts"], 0)
+        for field in ("quality_labels", "file_count", "files", "size", "audio", "parts"):
+            self.assertNotIn(field, card)
+        self.assertNotIn("1080p", repr(card))
 
     def test_4k_detection_uses_quality_and_parsed_resolution(self):
         is_4k = NAMESPACE["_is_4k"]
@@ -219,6 +236,43 @@ class PublicSiteSafetyTests(unittest.TestCase):
             "telegram": [{"quality": "720p", "is_dead": True}],
         }, datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=14)))
 
+    def test_public_cache_is_bounded_and_invalidation_clears_library_and_stats(self):
+        set_cache = NAMESPACE["_public_cache_set"]
+        get_cache = NAMESPACE["_public_cache_get"]
+        cache = NAMESPACE["_PUBLIC_CACHE"]
+        cache.clear()
+        NAMESPACE["_STATS_CACHE"].update({"at": time.monotonic(), "value": {"movies": 123}})
+        payload = {"items": [{"title": "Example"}]}
+        set_cache("test", payload)
+        payload["items"][0]["title"] = "Mutated outside"
+        cached = get_cache("test")
+        self.assertEqual(cached["items"][0]["title"], "Example")
+        cached["items"][0]["title"] = "Mutated by reader"
+        self.assertEqual(get_cache("test")["items"][0]["title"], "Example")
+        NAMESPACE["invalidate_public_cache"]()
+        self.assertEqual(len(cache), 0)
+        self.assertIsNone(NAMESPACE["_STATS_CACHE"]["value"])
+
+    def test_admin_plan_form_and_backend_store_all_public_fields(self):
+        root = Path(__file__).resolve().parents[1]
+        template = (root / "Backend/fastapi/templates/subscriptions_manage.html").read_text(encoding="utf-8")
+        database = (root / "Backend/helper/database.py").read_text(encoding="utf-8")
+        api = (root / "Backend/fastapi/routes/api_routes.py").read_text(encoding="utf-8")
+        for field_id in ("plan-name", "plan-days", "plan-price", "plan-daily-cap", "plan-monthly-cap"):
+            self.assertIn(field_id, template)
+        for field in ('"name": name.strip()', '"daily_cap_gb": daily_cap_gb', '"monthly_cap": monthly_cap'):
+            self.assertIn(field, database)
+        self.assertIn('daily_cap = _normalize_plan_cap(payload.get("daily_cap_gb"), "Daily Cap")', api)
+        self.assertIn('monthly_cap = _normalize_plan_cap(payload.get("monthly_cap"), "Monthly Cap")', api)
+        self.assertIn("/admin/plans", (root / "Backend/fastapi/main.py").read_text(encoding="utf-8"))
+
+    def test_exclusivity_changes_invalidate_public_cache(self):
+        database = (Path(__file__).resolve().parents[1] / "Backend/helper/database.py").read_text(encoding="utf-8")
+        apply_body = database.split("async def _apply_exclusivity_to_docs", 1)[1].split("async def _clear_exclusivity_from_docs", 1)[0]
+        clear_body = database.split("async def _clear_exclusivity_from_docs", 1)[1].split("async def purge_items_from_other_catalogs", 1)[0]
+        self.assertIn("_invalidate_public_catalog_cache()", apply_body)
+        self.assertIn("_invalidate_public_catalog_cache()", clear_body)
+
     def test_candidate_limit_allows_full_catalogue_pagination_with_a_hard_bound(self):
         candidate_limit = NAMESPACE["_candidate_limit"]
         self.assertEqual(candidate_limit(50, 24), 1200)
@@ -237,12 +291,80 @@ class PublicSiteSafetyTests(unittest.TestCase):
         self.assertEqual(safe["name"], "HD Plus")
         self.assertEqual(safe["days"], 90)
         self.assertEqual(safe["price"], 179)
-        self.assertEqual(safe["daily_limit_gb"], 70)
+        self.assertEqual(safe["daily_cap_gb"], 70)
+        self.assertEqual(safe["monthly_cap"], "Unlimited")
         self.assertNotIn("_id", safe)
         self.assertNotIn("created_at", safe)
         self.assertNotIn("api_token", safe)
         self.assertIsNone(project({"days": 0, "price": 10}))
         self.assertIsNone(project({"days": 30, "price": float("inf")}))
+
+    def test_public_plan_projection_uses_persisted_caps(self):
+        safe = NAMESPACE["_public_plan_record"]({
+            "name": "Ultra", "days": 90, "price": 499, "currency": "INR",
+            "daily_cap_gb": 100, "monthly_cap": 2500,
+            "secret": "never expose",
+        })
+        self.assertEqual(safe["daily_cap_gb"], 100)
+        self.assertEqual(safe["monthly_cap"], 2500)
+        self.assertNotIn("secret", repr(safe))
+
+    def test_public_library_endpoint_caches_final_page_payload_not_storage_candidates(self):
+        source = SOURCE.read_text(encoding="utf-8")
+        api_body = source.split("async def public_library_api(", 1)[1].split('@router.get("/api/public/plans")', 1)[0]
+        load_body = source.split("async def _load_list_page(", 1)[1].split("async def _public_stats(", 1)[0]
+        self.assertIn("public-library-response:", api_body)
+        self.assertIn("_public_cache_get(cache_key)", api_body)
+        self.assertIn("_public_cache_set(cache_key, response_payload)", api_body)
+        self.assertNotIn("_public_cache_set", load_body)
+
+    def test_public_templates_parse_and_tv_episode_layout_is_bounded(self):
+        template_dir = SOURCE.parents[1] / "templates"
+        env = Environment()
+        for name in ("public_base.html", "public_library.html", "public_detail.html", "public_plans.html"):
+            env.from_string((template_dir / name).read_text(encoding="utf-8"))
+        base = (template_dir / "public_base.html").read_text(encoding="utf-8")
+        self.assertIn("grid-template-columns:minmax(120px,170px) minmax(0,1fr)", base)
+        self.assertIn(".episode-copy{min-width:0;max-width:100%;overflow:hidden;overflow-wrap:anywhere}", base)
+        detail = (template_dir / "public_detail.html").read_text(encoding="utf-8")
+        self.assertIn("BACK TO LIBRARY", detail)
+
+    def test_library_restoration_keeps_original_scroll_y_while_reloading_pages(self):
+        template = (SOURCE.parents[1] / "templates/public_library.html").read_text(encoding="utf-8")
+        self.assertIn("let restoringSavedState = false", template)
+        self.assertIn("scrollY:restoringSavedState ? savedScrollY : window.scrollY", template)
+        self.assertIn("window.scrollTo(0,savedScrollY)", template)
+
+    def test_plans_home_uses_db_backed_caps_and_contains_no_fake_reviews(self):
+        main = (SOURCE.parents[1] / "main.py").read_text(encoding="utf-8")
+        plans = (SOURCE.parents[1] / "templates/public_plans.html").read_text(encoding="utf-8")
+        self.assertIn("return await public_plans_page(request)", main)
+        self.assertIn("plan.daily_cap_gb", plans)
+        self.assertIn("plan.monthly_cap", plans)
+        for phrase in ("customer reviews", "testimonials", "5-star reviews"):
+            self.assertNotIn(phrase, plans.casefold())
+
+    def test_public_site_does_not_expose_quality_filter_or_technical_file_rows(self):
+        source = SOURCE.read_text(encoding="utf-8")
+        self.assertIn('pattern="^(all|new)$"', source)
+        detail_template = (SOURCE.parents[1] / "templates/public_detail.html").read_text(encoding="utf-8")
+        library_template = (SOURCE.parents[1] / "templates/public_library.html").read_text(encoding="utf-8")
+        self.assertNotIn("Technical versions", detail_template)
+        self.assertNotIn("Available versions", detail_template)
+        self.assertNotIn("quality-pill", library_template)
+        self.assertNotIn('data-filter="4k"', library_template)
+
+    def test_public_homepage_is_plans_and_library_has_own_route(self):
+        main_source = (Path(__file__).resolve().parents[1] / "Backend/fastapi/main.py").read_text(encoding="utf-8")
+        self.assertIn("return await public_plans_page(request)", main_source)
+        self.assertIn('@router.get("/library", response_class=HTMLResponse)', SOURCE.read_text(encoding="utf-8"))
+
+    def test_library_return_state_is_persisted_and_restored(self):
+        library_template = (SOURCE.parents[1] / "templates/public_library.html").read_text(encoding="utf-8")
+        detail_template = (SOURCE.parents[1] / "templates/public_detail.html").read_text(encoding="utf-8")
+        self.assertIn("sessionStorage.setItem(STORAGE_KEY", library_template)
+        self.assertIn("saved.scrollY", library_template)
+        self.assertIn("history.back()", detail_template)
 
 
 if __name__ == "__main__":

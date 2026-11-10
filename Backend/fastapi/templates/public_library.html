@@ -4,11 +4,10 @@
 <section>
   <p class="eyebrow">CODECINDEX · LIBRARY INDEX</p>
   <h1 class="page-title">What's in <em>the vault</em></h1>
-  <div class="stats-grid" id="public-stats">
-    <div class="stat"><div class="stat-label">Movies</div><div class="stat-num" id="stat-movies">—</div><div class="stat-sub">titles in the library</div></div>
-    <div class="stat"><div class="stat-label">Movie files</div><div class="stat-num" id="stat-movie-files">—</div><div class="stat-sub">distinct qualities across movies</div></div>
-    <div class="stat"><div class="stat-label">TV shows</div><div class="stat-num" id="stat-tv">—</div><div class="stat-sub">series available</div></div>
-    <div class="stat"><div class="stat-label">Episode files</div><div class="stat-num" id="stat-episode-files">—</div><div class="stat-sub"><span id="stat-episodes">—</span> episodes · distinct qualities</div></div>
+  <div class="stats-grid stats-grid-clean" id="public-stats">
+    <div class="stat"><div class="stat-label">Movies</div><div class="stat-num" id="stat-movies">—</div><div class="stat-sub">public titles</div></div>
+    <div class="stat"><div class="stat-label">TV shows</div><div class="stat-num" id="stat-tv">—</div><div class="stat-sub">public series</div></div>
+    <div class="stat"><div class="stat-label">Episodes</div><div class="stat-num" id="stat-episodes">—</div><div class="stat-sub">indexed episodes</div></div>
   </div>
   <label class="search-wrap"><span class="soft">⌕</span><input id="library-search" type="search" maxlength="80" autocomplete="off" placeholder="Name, name + year, IMDb (tt...) or TMDb id"></label>
   <div class="toolbar">
@@ -16,7 +15,7 @@
       <button class="chip active" data-type="all">All</button><button class="chip" data-type="movie">Movies</button><button class="chip" data-type="tv">Shows</button>
     </div>
     <div class="chips" id="filter-chips">
-      <button class="chip active" data-filter="all">Everything</button><button class="chip" data-filter="4k">4K</button><button class="chip" data-filter="new">New episodes</button>
+      <button class="chip active" data-filter="all">Everything</button><button class="chip" data-filter="new">New episodes</button>
     </div>
     <select id="library-sort" class="sort-select" aria-label="Sort library"><option value="recent">Recently added</option><option value="title">A–Z</option><option value="rating">Top rated</option></select>
   </div>
@@ -29,24 +28,41 @@
 <script>
 (() => {
   const state = {q:'',type:'all',filter:'all',sort:'recent',page:1,pages:1,loading:false};
+  const STORAGE_KEY='codecindex-public-library-state-v2';
   const grid = document.getElementById('media-grid');
   const meta = document.getElementById('results-meta');
   const more = document.getElementById('load-more');
   const $ = id => document.getElementById(id);
   let debounce;
+  let restoringSavedState = false;
+  let savedScrollY = 0;
   const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const num = v => Number(v || 0).toLocaleString();
   const poster = item => item.poster ? `<img loading="lazy" src="${esc(item.poster)}" alt="${esc(item.title)} poster" onerror="this.remove()">` : `<div class="poster-placeholder">${esc(item.title)}</div>`;
   function card(item) {
     const kind = item.media_type === 'movie' ? 'MOVIE' : 'SERIES';
     const year = item.year || 'Year unknown';
-    const sub = item.media_type === 'movie' ? `${year} · ${num(item.file_count)} qualities` : `${year} · ${num(item.season_count)} seasons · ${num(item.episode_count)} eps · ${num(item.file_count)} qualities`;
-    const tags = (item.quality_labels || []).slice(0,3).map(q=>`<span class="tiny-tag">${esc(q)}</span>`).join('');
+    const sub = year;
     const path = `/library/${item.media_type === 'movie' ? 'movie' : 'tv'}/${encodeURIComponent(item.tmdb_id)}`;
-    return `<a class="media-card" href="${path}"><div class="poster">${poster(item)}<div class="poster-tags"><span class="tiny-tag">${kind}</span>${item.is_new?'<span class="tiny-tag">NEW EPS</span>':''}${tags}</div></div><div class="media-title" title="${esc(item.title)}">${esc(item.title)}</div><div class="media-meta">${esc(sub)}</div><div class="quality-row">${(item.quality_labels||[]).slice(0,4).map(q=>`<span class="quality-pill">${esc(q)}</span>`).join('')}</div></a>`;
+    return `<a class="media-card" href="${path}"><div class="poster">${poster(item)}</div><div class="media-title" title="${esc(item.title)}">${esc(item.title)}</div><div class="media-meta">${esc(sub)}</div></a>`;
   }
   function updateStats(s) {
-    $('stat-movies').textContent=num(s.movies); $('stat-movie-files').textContent=num(s.movie_files); $('stat-tv').textContent=num(s.tv_shows); $('stat-episode-files').textContent=num(s.episode_files); $('stat-episodes').textContent=num(s.episodes);
+    $('stat-movies').textContent=num(s.movies); $('stat-tv').textContent=num(s.tv_shows); $('stat-episodes').textContent=num(s.episodes);
+  }
+  function saveState() {
+    try {
+      sessionStorage.setItem(STORAGE_KEY, JSON.stringify({
+        ...state,
+        loading:false,
+        scrollY:restoringSavedState ? savedScrollY : window.scrollY
+      }));
+    } catch (_) {}
+  }
+  function applySavedControls(saved) {
+    $('library-search').value=saved.q||'';
+    document.querySelectorAll('#media-chips .chip').forEach(b=>b.classList.toggle('active',b.dataset.type===(saved.type||'all')));
+    document.querySelectorAll('#filter-chips .chip').forEach(b=>b.classList.toggle('active',b.dataset.filter===(saved.filter||'all')));
+    $('library-sort').value=saved.sort||'recent';
   }
   async function load(reset=true) {
     if (state.loading) return; state.loading=true; if(reset){state.page=1;grid.innerHTML='<div class="empty-state">Searching the vault…</div>';}
@@ -58,7 +74,7 @@
       const items=data.items||[]; if(!items.length && reset) grid.innerHTML='<div class="empty-state">No public titles match your search.</div>';
       grid.insertAdjacentHTML('beforeend',items.map(card).join(''));
       meta.textContent=`${num(data.total)} PUBLIC TITLES`;
-      state.pages=data.pages||1; more.style.display=state.page<state.pages?'inline-block':'none'; more.disabled=false; more.textContent='Load more titles';
+      state.pages=data.pages||1; more.style.display=state.page<state.pages?'inline-block':'none'; more.disabled=false; more.textContent='Load more titles'; saveState();
     } catch(err) { if(reset)grid.innerHTML=`<div class="empty-state">${esc(err.message||'Library unavailable. Please try again.')}</div>`; more.style.display='none'; }
     finally { state.loading=false; more.disabled=false; }
   }
@@ -67,7 +83,25 @@
   document.querySelectorAll('#filter-chips .chip').forEach(b=>b.addEventListener('click',()=>{document.querySelectorAll('#filter-chips .chip').forEach(x=>x.classList.remove('active'));b.classList.add('active');state.filter=b.dataset.filter;load(true);}));
   $('library-sort').addEventListener('change',e=>{state.sort=e.target.value;load(true);});
   more.addEventListener('click',()=>{if(state.page<state.pages){state.page++;load(false);}});
-  load(true);
+  grid.addEventListener('click',e=>{if(e.target.closest('a.media-card')) saveState();});
+  window.addEventListener('beforeunload', saveState);
+  (async()=>{
+    let saved=null; try { saved=JSON.parse(sessionStorage.getItem(STORAGE_KEY)||'null'); } catch (_) {}
+    if(saved && saved.q!==undefined){
+      restoringSavedState = true;
+      savedScrollY = Math.max(0, Number(saved.scrollY) || 0);
+      Object.assign(state,{q:saved.q||'',type:saved.type||'all',filter:saved.filter||'all',sort:saved.sort||'recent',page:1});
+      applySavedControls(saved);
+      await load(true);
+      const target=Math.max(1,Math.min(Number(saved.page)||1,state.pages));
+      for(let i=2;i<=target;i++){state.page=i;await load(false);}
+      requestAnimationFrame(()=>{
+        window.scrollTo(0,savedScrollY);
+        restoringSavedState = false;
+        saveState();
+      });
+    } else { load(true); }
+  })();
 })();
 </script>
 {% endblock %}
