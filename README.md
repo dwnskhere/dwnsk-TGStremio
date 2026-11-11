@@ -1010,6 +1010,16 @@ Telestream includes a built-in public registration portal for Emby users:
 
 ---
 
+# 📱 Experimental Jellyfin Android Compatibility (No Separate Server)
+
+Telegram-Stremio includes an experimental API compatibility layer intended to let the Jellyfin Android app connect directly to the existing Telegram-Stremio Heroku URL. It does **not** install or run the official Jellyfin Server.
+
+This is different from the existing `.strm` export feature above. The compatibility layer returns library information through Jellyfin-style API routes and forwards playback to Telegram-Stremio's existing Telegram streaming pipeline. It requires real-device testing and may need additional API behavior before all Jellyfin Android versions work.
+
+See **[JELLYFIN_ANDROID_SETUP.md](JELLYFIN_ANDROID_SETUP.md)** for the Heroku Config Vars, deployment, Android setup, and test steps.
+
+Required Heroku Config Vars: `JELLYFIN_COMPAT_ENABLED=true`, `JELLYFIN_USERNAME`, and `JELLYFIN_PASSWORD`.
+
 ## ❤️ Support the project
 
 If Telegram-Stremio is useful to you, you can support its development here:

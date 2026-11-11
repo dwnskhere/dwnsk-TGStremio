@@ -121,6 +121,7 @@ from Backend.fastapi.routes.cf_routes import router as cf_router
 from Backend.fastapi.routes.stremio_routes import router as stremio_router
 from Backend.fastapi.routes.webdav_routes import router as webdav_router
 from Backend.fastapi.routes.strm_routes import router as strm_router
+from Backend.fastapi.routes.jellyfin_routes import router as jellyfin_router, ensure_jellyfin_indexes
 from Backend.fastapi.routes.template_routes import (
     admin_access_page,
     admin_dashboard_page,
@@ -171,6 +172,11 @@ async def _startup():
     asyncio.create_task(version_check_loop())
     from Backend.helper.strm_generator import strm_auto_sync_loop
     asyncio.create_task(strm_auto_sync_loop(interval_hours=24))
+    try:
+        await ensure_jellyfin_indexes()
+    except Exception as exc:
+        from Backend.logger import LOGGER
+        LOGGER.warning(f"[JELLYFIN] Compatibility indexes will be created on first login: {exc}")
 
 
 #----- Streaming and Stremio routers
@@ -179,6 +185,7 @@ app.include_router(cf_router)
 app.include_router(stremio_router)
 app.include_router(webdav_router)
 app.include_router(strm_router)
+app.include_router(jellyfin_router)
 
 
 #----- Public routes (no authentication)

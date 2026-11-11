@@ -49,3 +49,11 @@ class Telegram:
 
     #----- Emby / Jellyfin STRM Export
     STRM_EXPORT_DIR = getenv('STRM_EXPORT_DIR', '')
+
+    #----- Experimental Jellyfin Android API compatibility (no separate Jellyfin host)
+    JELLYFIN_COMPAT_ENABLED = getenv("JELLYFIN_COMPAT_ENABLED", "false").lower() == "true"
+    JELLYFIN_USERNAME = getenv("JELLYFIN_USERNAME", "")
+    JELLYFIN_PASSWORD = getenv("JELLYFIN_PASSWORD", "")
+    JELLYFIN_SERVER_ID = getenv("JELLYFIN_SERVER_ID", "")
+    JELLYFIN_SERVER_NAME = getenv("JELLYFIN_SERVER_NAME", "Telegram-Stremio")
+    JELLYFIN_TOKEN_TTL_DAYS = _int_env("JELLYFIN_TOKEN_TTL_DAYS", 30)
