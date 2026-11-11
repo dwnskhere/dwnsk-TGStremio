@@ -1,4 +1,6 @@
 import asyncio
+from time import monotonic
+from pathlib import Path
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -7,6 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from Backend import __version__
+from Backend.logger import LOGGER
 from Backend.fastapi.themes import DEFAULT_THEME, DEFAULT_STYLE, get_theme
 from Backend.fastapi.routes.api_routes import (
     add_custom_catalog_item_api,
@@ -121,7 +124,11 @@ from Backend.fastapi.routes.cf_routes import router as cf_router
 from Backend.fastapi.routes.stremio_routes import router as stremio_router
 from Backend.fastapi.routes.webdav_routes import router as webdav_router
 from Backend.fastapi.routes.strm_routes import router as strm_router
-from Backend.fastapi.routes.jellyfin_routes import router as jellyfin_router, ensure_jellyfin_indexes
+from Backend.fastapi.routes.jellyfin_routes import (
+    router as jellyfin_router,
+    ensure_jellyfin_indexes,
+    is_jellyfin_client_path,
+)
 from Backend.fastapi.routes.template_routes import (
     admin_access_page,
     admin_dashboard_page,
@@ -159,10 +166,52 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def jellyfin_request_diagnostics(request: Request, call_next):
+    """Log Jellyfin request paths/status only; never log query strings or credentials."""
+    path = request.url.path
+    lowered = path.casefold()
+    monitored = lowered.startswith((
+        "/system/", "/users", "/sessions", "/items", "/userviews",
+        "/displaypreferences", "/shows", "/videos", "/useritems", "/search/",
+        "/genres", "/years", "/studios", "/persons", "/quickconnect", "/web/", "/jellyfin/",
+    ))
+    if not monitored:
+        return await call_next(request)
+    started = monotonic()
+    try:
+        response = await call_next(request)
+    except Exception:
+        LOGGER.exception("[JELLYFIN] %s %s failed", request.method, path)
+        raise
+    elapsed_ms = (monotonic() - started) * 1000
+    LOGGER.info("[JELLYFIN] %s %s -> %s (%.1f ms)", request.method, path, response.status_code, elapsed_ms)
+    return response
+
 try:
     app.mount("/static", StaticFiles(directory="Backend/fastapi/static"), name="static")
 except Exception:
     pass
+
+# Jellyfin Android's embedded WebView loads the Jellyfin Web client from the
+# same server origin (for example /web/main.jellyfin.bundle.js).  The Docker
+# build copies the official, version-matched static distribution here.  Local
+# development without the Docker asset stage remains possible, but Jellyfin
+# compatibility will be incomplete and the warning makes that visible.
+JELLYFIN_WEB_DIR = Path(__file__).resolve().parent / "jellyfin_web"
+if JELLYFIN_WEB_DIR.is_dir() and (JELLYFIN_WEB_DIR / "index.html").is_file():
+    app.mount(
+        "/web",
+        StaticFiles(directory=str(JELLYFIN_WEB_DIR), html=True),
+        name="jellyfin_web",
+    )
+else:
+    from Backend.logger import LOGGER
+    LOGGER.warning(
+        "[JELLYFIN] Web client assets are missing. The Jellyfin Android app "
+        "will not complete startup until the Docker build copies the 10.10.7 /web assets."
+    )
 
 
 @app.on_event("startup")
@@ -877,9 +926,12 @@ async def tools_duplicates_purge(payload: dict | None = None, _: bool = Depends(
 
 @app.exception_handler(401)
 async def auth_exception_handler(request: Request, exc):
-    # API / stream / WebDAV clients must receive a real 401, not an HTML login redirect.
-    path = request.url.path or ""
-    if path.startswith(("/webdav", "/dl/", "/sub/", "/stremio/", "/api/", "/thumb/")):
+    # API / stream / WebDAV / Jellyfin clients must receive a real 401, not an
+    # HTML login redirect. Jellyfin's web client treats a redirect to the
+    # Telegram-Stremio admin login page as a failed server connection.
+    path = (request.url.path or "").casefold()
+    legacy_api_path = path.startswith(("/webdav", "/dl/", "/sub/", "/stremio/", "/api/", "/thumb/"))
+    if legacy_api_path or is_jellyfin_client_path(path):
         from fastapi.responses import JSONResponse
         detail = getattr(exc, "detail", "Unauthorized")
         headers = {}

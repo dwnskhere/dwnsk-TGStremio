@@ -1,1 +1,20 @@
+# Local/developer artifacts
 assets/
+.git/
+.venv/
+**/__pycache__/
+*.py[cod]
+*.session
+*.session-*
+
+# Secrets and runtime files must never be baked into an image
+.env
+.env.*
+config.env
+*.log
+log.txt
+
+# Common local/editor noise
+.DS_Store
+.vscode/
+.idea/

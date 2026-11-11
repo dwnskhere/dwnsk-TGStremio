@@ -23,6 +23,7 @@ dependencies = [
     "tgcrypto>=1.2.5",
     "themoviedb>=1.0.2",
     "uvicorn>=0.34.2",
+    "websockets>=13.1,<17",
     "uvloop>=0.22.1",
     "zstandard>=0.25.0",
 ]

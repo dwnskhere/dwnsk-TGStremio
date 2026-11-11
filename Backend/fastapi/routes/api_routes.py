@@ -73,6 +73,7 @@ from Backend.helper.subtitles import (
     resolve_subtitle_message,
 )
 from Backend.logger import LOGGER
+from Backend.log_path import LOG_FILE
 import Backend.pyrofork.bot as botmod
 from Backend.helper.announcer import delete_announcement_async
 from Backend.pyrofork.bot import (
@@ -2353,7 +2354,6 @@ async def purge_dead_links_api(payload: dict | None = None) -> dict:
 
 #----- ── System & Maintenance (web replacements for /stats, /log, /restart) ──
 
-LOG_FILE = "log.txt"
 
 
 #----- Aggregate content + system metrics across all storage DBs (was /stats)

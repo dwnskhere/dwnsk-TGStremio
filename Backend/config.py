@@ -54,6 +54,11 @@ class Telegram:
     JELLYFIN_COMPAT_ENABLED = getenv("JELLYFIN_COMPAT_ENABLED", "false").lower() == "true"
     JELLYFIN_USERNAME = getenv("JELLYFIN_USERNAME", "")
     JELLYFIN_PASSWORD = getenv("JELLYFIN_PASSWORD", "")
+    # API token used to decide which Telegram-Stremio titles this Jellyfin
+    # account may see and to authorize the existing Telegram stream pipeline.
+    # Falls back to the STRM default token stored in SettingsManager.
+    JELLYFIN_SOURCE_TOKEN = getenv("JELLYFIN_SOURCE_TOKEN", "").strip()
     JELLYFIN_SERVER_ID = getenv("JELLYFIN_SERVER_ID", "")
     JELLYFIN_SERVER_NAME = getenv("JELLYFIN_SERVER_NAME", "Telegram-Stremio")
     JELLYFIN_TOKEN_TTL_DAYS = _int_env("JELLYFIN_TOKEN_TTL_DAYS", 30)
+    JELLYFIN_PLAYBACK_TICKET_TTL_SECONDS = _int_env("JELLYFIN_PLAYBACK_TICKET_TTL_SECONDS", 21600)

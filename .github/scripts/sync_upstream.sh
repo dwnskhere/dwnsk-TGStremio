@@ -690,7 +690,20 @@ Cherry-pick failed at commit <b>${APPLIED}/${TOTAL}</b>:
     fi
 done
 
-# ── Step 6: Push to Origin ─────────────────────────────────────────────────
+# ── Step 6: Validate compatibility before pushing ──────────────────────────
+step "Pre-push Compatibility Validation"
+
+# Upstream cherry-picks can touch the same FastAPI/API files used by the
+# Jellyfin compatibility layer. Never push an update that breaks the supported
+# API contract or deployment safety checks.
+if [ -f "tools/jellyfin_compat_contract_smoke_test.py" ]; then
+    python3 -m compileall -q Backend tools update.py
+    python3 tools/jellyfin_compat_contract_smoke_test.py
+    python3 tools/deployment_safety_smoke_test.py
+    success "Jellyfin compatibility checks passed."
+fi
+
+# ── Step 7: Push to Origin ─────────────────────────────────────────────────
 step "Pushing to Origin"
 
 divider

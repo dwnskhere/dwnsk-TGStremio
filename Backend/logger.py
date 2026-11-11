@@ -3,6 +3,8 @@ from logging import ERROR, INFO, FileHandler, Formatter, StreamHandler, basicCon
 
 import pytz
 
+from Backend.log_path import LOG_FILE
+
 IST = pytz.timezone("Asia/Kolkata")
 
 
@@ -15,7 +17,7 @@ class ISTFormatter(Formatter):
 
 #----- Root logging configuration
 formatter = ISTFormatter("[%(asctime)s] [%(levelname)s] - %(message)s", "%d-%b-%y %I:%M:%S %p")
-file_handler = FileHandler("log.txt")
+file_handler = FileHandler(LOG_FILE)
 stream_handler = StreamHandler()
 file_handler.setFormatter(formatter)
 stream_handler.setFormatter(formatter)

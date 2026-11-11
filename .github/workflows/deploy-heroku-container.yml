@@ -1,0 +1,60 @@
+name: Deploy Telegram-Stremio to Heroku Container
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Build and release Heroku web container
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      HEROKU_API_KEY: ${{ secrets.HEROKU_API_KEY }}
+      HEROKU_APP_NAME: ${{ secrets.HEROKU_APP_NAME }}
+    steps:
+      - name: Check required deployment secrets
+        shell: bash
+        run: |
+          if [[ -z "$HEROKU_API_KEY" || -z "$HEROKU_APP_NAME" ]]; then
+            echo "Missing GitHub Actions repository secrets: HEROKU_API_KEY and/or HEROKU_APP_NAME."
+            exit 1
+          fi
+
+      - name: Checkout source
+        uses: actions/checkout@v6
+
+      - name: Set up Python for deployment preflight
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install compatibility test dependencies
+        run: python -m pip install fastapi==0.115.12 httpx==0.28.1 python-dotenv==1.1.0 pytz==2025.2 websockets==16.0
+
+      - name: Compile application and tools
+        run: python -m compileall -q Backend tools update.py
+
+      - name: Run Jellyfin API contract tests
+        run: python tools/jellyfin_compat_contract_smoke_test.py
+
+      - name: Run deployment safety tests
+        run: python tools/deployment_safety_smoke_test.py
+
+      - name: Install Heroku CLI
+        shell: bash
+        run: curl -fsSL https://cli-assets.heroku.com/install.sh | sh
+
+      - name: Set app stack to container
+        run: heroku stack:set container --app "$HEROKU_APP_NAME"
+
+      - name: Authenticate to Heroku Container Registry
+        run: heroku container:login
+
+      - name: Build and push web image
+        run: heroku container:push web --app "$HEROKU_APP_NAME"
+
+      - name: Release web image
+        run: heroku container:release web --app "$HEROKU_APP_NAME"

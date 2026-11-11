@@ -1010,15 +1010,17 @@ Telestream includes a built-in public registration portal for Emby users:
 
 ---
 
-# 📱 Experimental Jellyfin Android Compatibility (No Separate Server)
+# 📱 Jellyfin Android compatibility (no separate Jellyfin host)
 
-Telegram-Stremio includes an experimental API compatibility layer intended to let the Jellyfin Android app connect directly to the existing Telegram-Stremio Heroku URL. It does **not** install or run the official Jellyfin Server.
+Telegram-Stremio includes a focused Jellyfin-compatible API layer so the Jellyfin Android app can use the **same Heroku app URL** as its server address. Heroku continues to run Telegram-Stremio; MongoDB stores the catalogue and compatibility state; Telegram remains the media source.
 
-This is different from the existing `.strm` export feature above. The compatibility layer returns library information through Jellyfin-style API routes and forwards playback to Telegram-Stremio's existing Telegram streaming pipeline. It requires real-device testing and may need additional API behavior before all Jellyfin Android versions work.
+**This is not the official Jellyfin Server and does not run a separate Jellyfin process.** It is a compatibility implementation for one configured Jellyfin-style account, Movies and TV Shows, direct streaming, playback progress and indexed external subtitles. It does not include transcoding, Live TV, Jellyfin plugin management or full server administration.
 
-See **[JELLYFIN_ANDROID_SETUP.md](JELLYFIN_ANDROID_SETUP.md)** for the Heroku Config Vars, deployment, Android setup, and test steps.
+The Jellyfin Web frontend is copied from the official matching Jellyfin 10.10.7 container image during the Docker build. Therefore, Jellyfin compatibility **requires the Heroku `container` stack**; a standard buildpack deployment will not include the Web frontend. The repository includes a Docker build check and an optional manual GitHub Actions workflow for deployment to Heroku Container Registry.
 
-Required Heroku Config Vars: `JELLYFIN_COMPAT_ENABLED=true`, `JELLYFIN_USERNAME`, and `JELLYFIN_PASSWORD`.
+See **[JELLYFIN_ANDROID_SETUP.md](JELLYFIN_ANDROID_SETUP.md)** for plain-language deployment and Android testing steps, and **[JELLYFIN_COMPATIBILITY_STATUS.md](JELLYFIN_COMPATIBILITY_STATUS.md)** for what has and has not been verified. Third-party Jellyfin Web licensing is documented in **[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)**.
+
+Required Heroku Config Vars: `JELLYFIN_COMPAT_ENABLED=true`, `JELLYFIN_USERNAME`, `JELLYFIN_PASSWORD`, and `JELLYFIN_ALLOW_UPSTREAM_AUTO_UPDATE=false`. Configure `JELLYFIN_SOURCE_TOKEN` only if no valid STRM default token is configured in Telegram-Stremio settings.
 
 ## ❤️ Support the project
 

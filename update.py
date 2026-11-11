@@ -5,22 +5,21 @@ from subprocess import run as srun
 from dotenv import load_dotenv
 from datetime import datetime
 import pytz
-import shutil
 
 IST = pytz.timezone("Asia/Kolkata")
+
+# Load deployment configuration before choosing writable runtime paths.
+load_dotenv("config.env")
 
 class ISTFormatter(Formatter):
     def formatTime(self, record, datefmt=None):
         dt = datetime.fromtimestamp(record.created, IST)
         return dt.strftime(datefmt or "%d-%b-%y %I:%M:%S %p")
 
-log_file = "log.txt"
+log_file = environ.get("APP_LOG_FILE") or ("/tmp/telegram-stremio.log" if environ.get("DYNO") or environ.get("PORT") else "log.txt")
 if ospath.exists(log_file):
     with open(log_file, "w") as f:
         f.truncate(0)
-if Path(".git").exists():
-    shutil.rmtree(".git")
-
 file_handler = FileHandler(log_file)
 stream_handler = StreamHandler()
 formatter = ISTFormatter("[%(asctime)s] [%(levelname)s] - %(message)s", "%d-%b-%y %I:%M:%S %p")
@@ -29,18 +28,16 @@ stream_handler.setFormatter(formatter)
 basicConfig(handlers=[file_handler, stream_handler], level=INFO)
 
 # ── Load config.env as the base (for DATABASE URI, etc.) ─────────────────────
-load_dotenv("config.env")
-
 
 def _fetch_upstream_from_db() -> tuple[str | None, str]:
     try:
-        from pymongo import MongoClient
-        raw_uris = environ.get("DATABASE", "")          
+        raw_uris = environ.get("DATABASE", "")
         uris = [u.strip() for u in raw_uris.replace(",", " ").split() if u.strip()]
         if not uris:
             log_info("update.py: No DATABASE found — skipping DB settings lookup.")
             return None, "master"
 
+        from pymongo import MongoClient
         tracking_uri = uris[0]
         client = MongoClient(tracking_uri, serverSelectionTimeoutMS=5000)
         doc = client["dbFyvio"]["settings"].find_one({"_id": "app_settings"})
@@ -62,6 +59,22 @@ db_repo, db_branch = _fetch_upstream_from_db()
 
 UPSTREAM_REPO   = db_repo   or environ.get("UPSTREAM_REPO",   "").strip() or None
 UPSTREAM_BRANCH = db_branch or environ.get("UPSTREAM_BRANCH", "").strip() or "master"
+
+# The Jellyfin compatibility build contains a pinned Jellyfin Web distribution
+# and compatibility API files.  The legacy auto-updater can reset the working
+# tree to a different upstream repository at process startup, silently deleting
+# both.  In compatibility mode, deployments must be updated through the
+# configured Heroku/Git source instead.  An explicit escape hatch is provided
+# for operators who intentionally maintain a compatible upstream fork.
+jellyfin_compat_mode = environ.get("JELLYFIN_COMPAT_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+allow_jellyfin_upstream_update = environ.get("JELLYFIN_ALLOW_UPSTREAM_AUTO_UPDATE", "false").strip().lower() in {"1", "true", "yes", "on"}
+if jellyfin_compat_mode and not allow_jellyfin_upstream_update and UPSTREAM_REPO:
+    log_info(
+        "JELLYFIN_COMPAT_ENABLED is active; skipping the legacy upstream self-update "
+        "to protect the Jellyfin compatibility API and bundled Web client. "
+        "Deploy source changes through the configured deployment repository."
+    )
+    UPSTREAM_REPO = None
 
 # ── Git update ────────────────────────────────────────────────────────────────
 if UPSTREAM_REPO:

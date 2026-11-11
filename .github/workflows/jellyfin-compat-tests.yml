@@ -1,0 +1,56 @@
+name: Jellyfin Compatibility Checks
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compatibility-contract:
+    name: API and deployment safety
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install test dependencies
+        run: python -m pip install fastapi==0.115.12 httpx==0.28.1 python-dotenv==1.1.0 pytz==2025.2 websockets==16.0
+
+      - name: Compile application and tools
+        run: python -m compileall -q Backend tools update.py
+
+      - name: Run Jellyfin Android API contract tests
+        run: python tools/jellyfin_compat_contract_smoke_test.py
+
+      - name: Run deployment safety tests
+        run: python tools/deployment_safety_smoke_test.py
+
+  container-build:
+    name: Build and verify Heroku container image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build container (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          tags: telegram-stremio:jellyfin-compat-check
