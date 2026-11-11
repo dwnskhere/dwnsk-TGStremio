@@ -24,7 +24,7 @@ A Jellyfin-compatible API and official Jellyfin Web static frontend embedded in 
 - HTTP range and HEAD requests forwarded to the existing streaming handler.
 - External subtitle tracks from Telegram-Stremio's existing subtitle index, with Jellyfin subtitle stream URLs protected by the Jellyfin token.
 - Readiness endpoint that checks Web frontend assets, source-token validity, MongoDB connectivity and Telegram stream-client availability.
-- Heroku-safe writable log path and protection against the legacy updater overwriting the compatibility build.
+- Heroku-safe writable log path; startup now skips the legacy runtime updater unconditionally whenever Jellyfin compatibility is enabled, preserving the generated Web assets even when the upstream repo/branch remains configured. See `JELLYFIN_RUNTIME_ASSET_FIX.md` for the specific failure shown in the user's Heroku logs.
 - API contract smoke tests, deployment-safety tests, static Web asset verification, token-redaction tests, Docker build CI and optional manual Heroku Container Registry deploy workflow. The manual deploy workflow now runs compile/API/deployment checks before pushing or releasing a container.
 
 ## Local checks executed in this workspace
@@ -45,6 +45,7 @@ The contract test covers server discovery, pre-login capability handshake, anony
 - The contract test uses a fake MongoDB and a fake Telegram stream handler. It does not prove a real Telegram download or real seek operation.
 - The Jellyfin Android app has not been tested against this final build.
 - The actual Heroku Container stack deployment, startup and readiness endpoint have not been verified from this workspace.
+- The deployed logs previously showed the runtime updater resetting the container to the same `jellyfin-test` Git branch. That reset removes generated `/web` assets because they are copied during Docker build but are not tracked in Git. The updated `start.sh` prevents that reset when Jellyfin compatibility is enabled and fails startup clearly if the Docker assets are absent.
 
 ## Deployment requirement
 

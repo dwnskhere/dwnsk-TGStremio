@@ -1020,7 +1020,7 @@ The Jellyfin Web frontend is copied from the official matching Jellyfin 10.10.7 
 
 See **[JELLYFIN_ANDROID_SETUP.md](JELLYFIN_ANDROID_SETUP.md)** for plain-language deployment and Android testing steps, and **[JELLYFIN_COMPATIBILITY_STATUS.md](JELLYFIN_COMPATIBILITY_STATUS.md)** for what has and has not been verified. Third-party Jellyfin Web licensing is documented in **[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)**.
 
-Required Heroku Config Vars: `JELLYFIN_COMPAT_ENABLED=true`, `JELLYFIN_USERNAME`, `JELLYFIN_PASSWORD`, and `JELLYFIN_ALLOW_UPSTREAM_AUTO_UPDATE=false`. Configure `JELLYFIN_SOURCE_TOKEN` only if no valid STRM default token is configured in Telegram-Stremio settings.
+Required Heroku Config Vars: `JELLYFIN_COMPAT_ENABLED=true`, `JELLYFIN_USERNAME`, and `JELLYFIN_PASSWORD`. Configure `JELLYFIN_SOURCE_TOKEN` only if no valid STRM default token is configured in Telegram-Stremio settings. In compatibility mode the startup script skips the legacy runtime updater so it cannot remove the Docker-bundled Jellyfin Web assets.
 
 ## ❤️ Support the project
 

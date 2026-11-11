@@ -67,11 +67,11 @@ UPSTREAM_BRANCH = db_branch or environ.get("UPSTREAM_BRANCH", "").strip() or "ma
 # configured Heroku/Git source instead.  An explicit escape hatch is provided
 # for operators who intentionally maintain a compatible upstream fork.
 jellyfin_compat_mode = environ.get("JELLYFIN_COMPAT_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
-allow_jellyfin_upstream_update = environ.get("JELLYFIN_ALLOW_UPSTREAM_AUTO_UPDATE", "false").strip().lower() in {"1", "true", "yes", "on"}
-if jellyfin_compat_mode and not allow_jellyfin_upstream_update and UPSTREAM_REPO:
+if jellyfin_compat_mode and UPSTREAM_REPO:
     log_info(
         "JELLYFIN_COMPAT_ENABLED is active; skipping the legacy upstream self-update "
-        "to protect the Jellyfin compatibility API and bundled Web client. "
+        "unconditionally. The Docker image contains generated Jellyfin Web assets "
+        "that are not stored in Git and must not be removed at runtime. "
         "Deploy source changes through the configured deployment repository."
     )
     UPSTREAM_REPO = None

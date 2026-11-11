@@ -32,7 +32,6 @@ Open Heroku Dashboard → your app → Settings → Config Vars. Keep your exist
 | `JELLYFIN_USERNAME` | A new username used only for Jellyfin, e.g. `dhanraj-jf` |
 | `JELLYFIN_PASSWORD` | A new strong password used only for Jellyfin |
 | `JELLYFIN_SERVER_NAME` | `Telegram-Stremio` |
-| `JELLYFIN_ALLOW_UPSTREAM_AUTO_UPDATE` | `false` |
 
 Optional settings:
 
@@ -44,6 +43,8 @@ Optional settings:
 | `JELLYFIN_PLAYBACK_TICKET_TTL_SECONDS` | Lifetime of an individual video/subtitle URL ticket; default is `21600` seconds (6 hours). Active playback refreshes this ticket, up to a maximum of 24 hours per idle window. |
 
 Do **not** put your Telegram bot token, MongoDB URI, Telegram-Stremio source API token or Heroku API key into Jellyfin Android. The Android app needs only the separate Jellyfin username and password.
+
+The existing `UPSTREAM_REPO` and `UPSTREAM_BRANCH` settings may remain configured for your Telegram-Stremio compatibility branch. When Jellyfin compatibility is enabled, `start.sh` deliberately skips the legacy runtime updater because it would remove the Web assets added during the Docker build. Do not remove your configured repository/branch; the deployment patch prevents runtime self-updates in compatibility mode. See `JELLYFIN_RUNTIME_ASSET_FIX.md` for the log-by-log explanation.
 
 ## 3. Deploy the Docker version to Heroku
 

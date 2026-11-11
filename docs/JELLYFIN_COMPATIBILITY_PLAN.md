@@ -104,7 +104,7 @@ Do not enter the source token into the Jellyfin app or send it in a message.
 
 The Jellyfin Web interface is added during the Docker image build. A normal Heroku buildpack deployment will not run the Dockerfile and will not include the web frontend.
 
-The Heroku app must use the **`container` stack**. The repository includes a manual GitHub Actions deployment workflow. Before using it, add GitHub repository secrets named `HEROKU_API_KEY` and `HEROKU_APP_NAME`, and turn off the old Heroku automatic buildpack deploy so two deployment paths cannot race. Exact user steps are in `JELLYFIN_ANDROID_SETUP.md`.
+The Heroku app must use the **`container` stack**. The repository includes a manual GitHub Actions deployment workflow. Before using it, add GitHub repository secrets named `HEROKU_API_KEY` and `HEROKU_APP_NAME`, and turn off the old Heroku automatic buildpack deploy so two deployment paths cannot race. Exact user steps are in `JELLYFIN_ANDROID_SETUP.md`. When compatibility is enabled, the startup script deliberately skips the runtime upstream updater: the official Web assets are generated in the container image and are not stored in the Git branch, so resetting the working tree would delete them.
 
 ## How we know whether the app is ready
 
