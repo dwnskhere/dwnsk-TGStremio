@@ -581,7 +581,7 @@ async def jellyfin_public_info():
         "LocalAddress": "",
         "ServerName": _server_name(),
         "Version": "10.10.7",
-        "ProductName": "Telegram-Stremio Jellyfin Compatibility",
+        "ProductName": "Jellyfin Server",
         "OperatingSystem": "Linux",
         "Id": _server_id(),
         "StartupWizardCompleted": True,
@@ -594,7 +594,7 @@ async def jellyfin_system_info(request: Request):
     return {
         "ServerName": _server_name(),
         "Version": "10.10.7",
-        "ProductName": "Telegram-Stremio Jellyfin Compatibility",
+        "ProductName": "Jellyfin Server",
         "OperatingSystem": "Linux",
         "Id": _server_id(),
         "StartupWizardCompleted": True,
@@ -1034,3 +1034,20 @@ async def jellyfin_playing_stopped(request: Request):
             upsert=True,
         )
     return Response(status_code=204)
+
+
+# Jellyfin clients and SDKs may request lowercase paths (for example,
+# /system/info/public). Jellyfin's own server routing is case-insensitive,
+# but FastAPI/Starlette is case-sensitive. Register lowercase aliases for all
+# compatibility endpoints so the Android client can use either form.
+from fastapi.routing import APIRoute as _APIRoute
+
+for _original_route in tuple(router.routes):
+    if isinstance(_original_route, _APIRoute) and _original_route.path != _original_route.path.lower():
+        router.add_api_route(
+            _original_route.path.lower(),
+            _original_route.endpoint,
+            methods=sorted(_original_route.methods or []),
+            name=f"{_original_route.name}_lowercase",
+            include_in_schema=False,
+        )

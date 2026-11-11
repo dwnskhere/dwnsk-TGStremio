@@ -109,6 +109,9 @@ assert '/Items/{item_id}/PlaybackInfo' in openapi_schema['paths']
 client=TestClient(app)
 
 r=client.get('/System/Info/Public'); assert r.status_code==200, r.text
+assert r.json()['ProductName'] == 'Jellyfin Server', r.json()
+lower_info=client.get('/system/info/public'); assert lower_info.status_code==200, lower_info.text
+assert lower_info.json()['Id'] == r.json()['Id']
 bad=client.post('/Users/AuthenticateByName', json={'Username':'tester','Pw':'wrong-password'})
 assert bad.status_code==401, bad.text
 r=client.post('/Users/AuthenticateByName', json={'Username':'tester','Pw':'very-secret'}, headers={'Authorization':'MediaBrowser Client="Test", Device="Phone", DeviceId="phone-1", Version="1.0"'})
@@ -141,7 +144,8 @@ show_id=shows.json()['Items'][0]['Id']
 seasons=client.get('/Shows/'+show_id+'/Seasons',headers=auth); assert seasons.status_code==200 and seasons.json()['TotalRecordCount']==1
 season_id=seasons.json()['Items'][0]['Id']
 episodes=client.get('/Items',params={'ParentId':season_id},headers=auth); assert episodes.status_code==200 and episodes.json()['TotalRecordCount']==1
-print('PASS: public server info')
+print('PASS: public server info (both PascalCase and lowercase paths)')
+print('PASS: exact Jellyfin product identifier and public server-info payload')
 print('PASS: separate username/password authentication returns access token')
 print('PASS: Jellyfin SHA-1 password compatibility and session identifier')
 print('PASS: authenticated user and library views')

@@ -71,3 +71,10 @@ The official Jellyfin Android app has not yet confirmed that it accepts this API
 ## Where to start
 
 Follow `JELLYFIN_ANDROID_SETUP.md` in order. First open `/System/Info/Public` in your phone browser. Then add the Heroku base URL (without `/stremio` or any extra path) in Jellyfin Android and try signing in.
+
+
+## Android server discovery compatibility correction
+
+The Android app rejects a reachable endpoint as “Unsupported version or product” if the public system-info response does not identify the product as `Jellyfin Server`. The compatibility endpoint now returns that exact product identifier while keeping `ServerName` as `Telegram-Stremio`. Lowercase aliases are also registered for all compatibility routes because FastAPI is case-sensitive by default while Jellyfin clients may request lowercase paths such as `/system/info/public`.
+
+This fixes the known discovery mismatch in the local source. It still needs deployment and verification in the user's live Heroku app and Android client.

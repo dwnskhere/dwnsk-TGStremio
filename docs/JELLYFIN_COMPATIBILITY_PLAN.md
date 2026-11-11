@@ -243,6 +243,10 @@ Connect protocol.
 
 ------------------------------------------------------------------------
 
+### Server identification requirement
+
+The public system-info response must expose `ProductName: "Jellyfin Server"` because Jellyfin clients validate the product identifier during server discovery. The user-facing server name remains `Telegram-Stremio`. The compatibility layer is still an independent implementation; this product identifier is used only for protocol/client recognition. Register lowercase route aliases as well as the documented PascalCase routes because FastAPI is case-sensitive by default, unlike Jellyfin server routing.
+
 ## 5. API compatibility roadmap
 
 The endpoint list below is a **development target**, not a claim that

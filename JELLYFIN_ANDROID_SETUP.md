@@ -50,7 +50,7 @@ When the app starts, the log may show a Jellyfin compatibility index message. Th
 Open this address in your phone browser, replacing the example host with your actual Heroku app URL:
 
 ```text
-https://YOUR-APP-NAME.herokuapp.com/System/Info/Public
+https://YOUR-APP-NAME.herokuapp.com/system/info/public
 ```
 
 You should see JSON text containing fields similar to:
@@ -58,13 +58,13 @@ You should see JSON text containing fields similar to:
 ```json
 {
   "ServerName": "Telegram-Stremio",
-  "ProductName": "Telegram-Stremio Jellyfin Compatibility",
+  "ProductName": "Jellyfin Server",
   "Id": "a stable server id",
   "StartupWizardCompleted": true
 }
 ```
 
-This is only a first connectivity check. It does not yet prove that the Android app will accept the server.
+This is the first compatibility check. The response must be JSON and `ProductName` must read `Jellyfin Server`. The Android app may also request the PascalCase variant `/System/Info/Public`; both path forms are supported.
 
 If you get `404`, check that `JELLYFIN_COMPAT_ENABLED` is exactly `true` and both Jellyfin username/password Config Vars are present. If you get `Application Error`, check the Heroku logs and deployment.
 
@@ -113,8 +113,8 @@ The bridge reuses Telegram-Stremio's current streaming implementation. It is int
 Please send:
 
 1. The exact screen/error message from Jellyfin Android.
-2. The Android app version (Jellyfin → Settings → About, or the app info page).
-3. Whether the `/System/Info/Public` browser test worked.
+2. Whether the lowercase `/system/info/public` page displays JSON with `ProductName` set to `Jellyfin Server`.
+3. The Android app version (Jellyfin → Settings → About, or the app info page).
 4. The matching Heroku log lines from the time you tried.
 
 Do not send your Jellyfin password, access token, Telegram API token, bot token, or MongoDB URI. Hide those values in screenshots and logs.
