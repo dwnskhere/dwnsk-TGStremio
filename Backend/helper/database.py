@@ -46,6 +46,15 @@ def _announcement_quality_labels(items) -> list[str]:
     })
 
 
+
+def _invalidate_public_catalog_cache():
+    try:
+        from Backend.fastapi.routes.public_site import invalidate_public_cache
+        invalidate_public_cache()
+    except Exception:
+        pass
+
+
 class Database:
     def __init__(self, db_name: str = "dbFyvio"):
         self.db_uris = Telegram.DATABASE
@@ -58,6 +67,7 @@ class Database:
         self.dbs: Dict[str, motor.motor_asyncio.AsyncIOMotorDatabase] = {}
 
         self.current_db_index = 1
+        self._monthly_cap_normalized = False
 
     async def connect(self):
         try:
@@ -399,26 +409,71 @@ class Database:
     #----- Admin Subscription Management
     #-----
     async def get_subscription_plans(self) -> List[dict]:
-        cursor = self.dbs["tracking"]["sub_plans"].find().sort("days", ASCENDING)
+        collection = self.dbs["tracking"]["sub_plans"]
+        # Monthly usage is currently unlimited for every offered plan. Keep the
+        # field in the schema for future releases, but normalize existing records
+        # once per process so legacy numeric caps do not contradict the current policy.
+        if not self._monthly_cap_normalized:
+            await collection.update_many(
+                {"monthly_cap": {"$ne": "Unlimited"}},
+                {"$set": {"monthly_cap": "Unlimited"}},
+            )
+            self._monthly_cap_normalized = True
+        cursor = collection.find().sort("days", ASCENDING)
         plans = await cursor.to_list(None)
-        return [convert_objectid_to_str(plan) for plan in plans]
+        # Idempotently backfill fields on plans created before public plan
+        # entitlements existed. Each update only writes a field that is still
+        # absent, so a concurrent admin edit is never overwritten.
+        legacy_names = {30: "Starter", 90: "Basic", 180: "Pro", 365: "Premium"}
+        legacy_daily_caps = {30: 50, 90: 70, 180: 98, 365: 137}
+        clean = []
+        for plan in plans:
+            days = int(plan.get("days") or 0)
+            defaults = {
+                "name": legacy_names.get(days, f"{days}-Day Plan"),
+                "daily_cap_gb": legacy_daily_caps.get(days),
+                "monthly_cap": "Unlimited",
+            }
+            for field, value in defaults.items():
+                if field not in plan:
+                    await collection.update_one(
+                        {"_id": plan["_id"], field: {"$exists": False}},
+                        {"$set": {field: value}},
+                    )
+            refreshed = await collection.find_one({"_id": plan["_id"]})
+            clean.append(convert_objectid_to_str(refreshed or {**plan, **defaults}))
+        return clean
 
-    async def add_subscription_plan(self, days: int, price: float, currency: str = "INR") -> Optional[str]:
+    async def add_subscription_plan(
+        self, days: int, price: float, currency: str = "INR", name: str = "",
+        daily_cap_gb=None, monthly_cap="Unlimited"
+    ) -> Optional[str]:
         result = await self.dbs["tracking"]["sub_plans"].insert_one({
+            "name": name.strip(),
             "days": days,
             "price": price,
             "currency": (currency or "INR").upper(),
+            "daily_cap_gb": daily_cap_gb,
+            "monthly_cap": "Unlimited",
             "created_at": datetime.utcnow()
         })
         return str(result.inserted_id)
 
-    async def update_subscription_plan(self, plan_id: str, days: int, price: float, currency: str = "INR") -> bool:
+    async def update_subscription_plan(
+        self, plan_id: str, days: int, price: float, currency: str = "INR", name: str = "",
+        daily_cap_gb=None, monthly_cap="Unlimited"
+    ) -> bool:
         try:
             result = await self.dbs["tracking"]["sub_plans"].update_one(
                 {"_id": ObjectId(plan_id)},
-                {"$set": {"days": days, "price": price, "currency": (currency or "INR").upper(), "updated_at": datetime.utcnow()}}
+                {"$set": {
+                    "name": name.strip(), "days": days, "price": price,
+                    "currency": (currency or "INR").upper(),
+                    "daily_cap_gb": daily_cap_gb, "monthly_cap": "Unlimited",
+                    "updated_at": datetime.utcnow()
+                }}
             )
-            return result.modified_count > 0
+            return result.matched_count > 0
         except Exception:
             return False
 
@@ -701,18 +756,22 @@ class Database:
                 groups.setdefault((db_index, collection), []).append(int(it.get("tmdb_id")))
             except (TypeError, ValueError):
                 continue
+        changed_any = False
         for (db_index, collection), ids in groups.items():
             db_key = f"storage_{db_index}"
             if db_key not in self.dbs:
                 continue
             try:
                 #----- Metadata-only change: never touch updated_on (keeps Latest order)
-                await self.dbs[db_key][collection].update_many(
+                result = await self.dbs[db_key][collection].update_many(
                     {"tmdb_id": {"$in": ids}},
                     {"$set": {"visibility": visibility, "allowed_tokens": allowed_tokens}},
                 )
+                changed_any = changed_any or bool(result.modified_count)
             except Exception as e:
                 LOGGER.error(f"_apply_visibility_to_docs failed for {db_key}.{collection}: {e}")
+        if changed_any:
+            _invalidate_public_catalog_cache()
 
     #----- Group catalog items into {(db_index, collection): [tmdb_id, ...]}
     def _group_items_by_storage(self, items: List[dict]) -> Dict[Tuple[int, str], List[int]]:
@@ -728,21 +787,26 @@ class Database:
 
     #----- Lock the given titles to a single catalog (source of truth on the docs)
     async def _apply_exclusivity_to_docs(self, items: List[dict], catalog_id: str, searchable: bool) -> None:
+        changed_any = False
         for (db_index, collection), ids in self._group_items_by_storage(items).items():
             db_key = f"storage_{db_index}"
             if db_key not in self.dbs:
                 continue
             try:
                 #----- Metadata-only change: never touch updated_on (keeps Latest order)
-                await self.dbs[db_key][collection].update_many(
+                result = await self.dbs[db_key][collection].update_many(
                     {"tmdb_id": {"$in": ids}},
                     {"$set": {"exclusive_catalog_id": str(catalog_id), "exclusive_searchable": bool(searchable)}},
                 )
+                changed_any = changed_any or bool(getattr(result, "modified_count", 0))
             except Exception as e:
                 LOGGER.error(f"_apply_exclusivity_to_docs failed for {db_key}.{collection}: {e}")
+        if changed_any:
+            _invalidate_public_catalog_cache()
 
     #----- Unlock the given titles so they return to default/auto/other catalogs
     async def _clear_exclusivity_from_docs(self, items: List[dict]) -> None:
+        changed_any = False
         for (db_index, collection), ids in self._group_items_by_storage(items).items():
             db_key = f"storage_{db_index}"
             if db_key not in self.dbs:
@@ -750,13 +814,16 @@ class Database:
             try:
                 #----- Unlocking is metadata-only: keep updated_on so titles slot back into
                 #----- their original place in Latest (auto.synced reset lets sync re-add)
-                await self.dbs[db_key][collection].update_many(
+                result = await self.dbs[db_key][collection].update_many(
                     {"tmdb_id": {"$in": ids}},
                     {"$unset": {"exclusive_catalog_id": "", "exclusive_searchable": ""},
                      "$set": {"auto_catalog.synced": False}},
                 )
+                changed_any = changed_any or bool(getattr(result, "modified_count", 0))
             except Exception as e:
                 LOGGER.error(f"_clear_exclusivity_from_docs failed for {db_key}.{collection}: {e}")
+        if changed_any:
+            _invalidate_public_catalog_cache()
 
     #----- Remove the given titles from every catalog except the one that owns them
     async def purge_items_from_other_catalogs(self, catalog_id: str, items: List[dict]) -> None:
@@ -834,6 +901,7 @@ class Database:
                     {"tmdb_id": int(tmdb_id)},
                     {"$set": {"visibility": visibility, "allowed_tokens": tokens}},
                 )
+                _invalidate_public_catalog_cache()
             except Exception as e:
                 LOGGER.error(f"set_media_visibility doc update failed: {e}")
 
@@ -1157,7 +1225,10 @@ class Database:
             return False
         doc["updated_on"] = datetime.utcnow()
         result = await self.dbs[db_key][collection_name].replace_one({"tmdb_id": tmdb_id}, doc)
-        return result.modified_count > 0
+        if result.modified_count > 0:
+            _invalidate_public_catalog_cache()
+            return True
+        return False
 
     #----- Locate an existing doc across storage DBs by imdb_id, then tmdb_id, then title+year
     async def _find_existing_media(
@@ -1292,6 +1363,7 @@ class Database:
                     movie["telegram"] = new_telegram
                     movie["updated_on"] = datetime.utcnow()
                     await db["movie"].replace_one({"_id": movie["_id"]}, movie)
+                _invalidate_public_catalog_cache()
                 return True
 
             tv = await db["tv"].find_one(
@@ -1579,6 +1651,7 @@ class Database:
             try:
                 movie_dict["db_index"] = self.current_db_index
                 result = await self.dbs[current_db_key]["movie"].insert_one(movie_dict)
+                _invalidate_public_catalog_cache()
                 return result.inserted_id
             except Exception as e:
                 LOGGER.error(f"Insertion failed in {current_db_key}: {e}")
@@ -1615,6 +1688,7 @@ class Database:
         if existing_db_index != self.current_db_index:
             try:
                 if await self._move_document("movie", existing_movie, existing_db_index):
+                    _invalidate_public_catalog_cache()
                     return movie_id
             except Exception as e:
                 LOGGER.error(f"Error moving movie to {current_db_key}: {e}")
@@ -1623,6 +1697,7 @@ class Database:
 
         try:
             await self.dbs[existing_db_key]["movie"].replace_one({"_id": movie_id}, existing_movie)
+            _invalidate_public_catalog_cache()
             return movie_id
         except Exception as e:
             LOGGER.error(f"Failed to update movie {tmdb_id} in {existing_db_key}: {e}")
@@ -1654,9 +1729,14 @@ class Database:
             if status is not None:
                 status["announcement_previous_episode_qualities"] = {}
                 status["announcement_previous_season_qualities"] = {}
+            indexed_now = datetime.utcnow()
+            for incoming_season in tv_show_dict.get("seasons") or []:
+                for incoming_episode in incoming_season.get("episodes") or []:
+                    incoming_episode["indexed_on"] = incoming_episode.get("indexed_on") or indexed_now
             try:
                 tv_show_dict["db_index"] = self.current_db_index
                 result = await self.dbs[current_db_key]["tv"].insert_one(tv_show_dict)
+                _invalidate_public_catalog_cache()
                 return result.inserted_id
             except Exception as e:
                 LOGGER.error(f"Insertion failed in {current_db_key}: {e}")
@@ -1729,6 +1809,9 @@ class Database:
             )
 
             if not existing_season:
+                indexed_now = datetime.utcnow()
+                for incoming_episode in season.get("episodes") or []:
+                    incoming_episode["indexed_on"] = incoming_episode.get("indexed_on") or indexed_now
                 existing_tv["seasons"].append(season)
                 continue
 
@@ -1748,6 +1831,7 @@ class Database:
                     )
 
                 if not existing_episode:
+                    episode["indexed_on"] = episode.get("indexed_on") or datetime.utcnow()
                     existing_season["episodes"].append(episode)
                     continue
 
@@ -1767,6 +1851,7 @@ class Database:
         if existing_db_index != self.current_db_index:
             try:
                 if await self._move_document("tv", existing_tv, existing_db_index):
+                    _invalidate_public_catalog_cache()
                     return tv_id
             except Exception as e:
                 LOGGER.error(f"Error moving TV show to {current_db_key}: {e}")
@@ -1776,6 +1861,7 @@ class Database:
 
         try:
             await self.dbs[existing_db_key]["tv"].replace_one({"_id": tv_id}, existing_tv)
+            _invalidate_public_catalog_cache()
             return tv_id
         except Exception as e:
             LOGGER.error(f"Failed to update TV show {tmdb_id} in {existing_db_key}: {e}")
@@ -2186,6 +2272,7 @@ class Database:
         result = await self.dbs[db_key][collection_name].delete_one({"tmdb_id": tmdb_id})
         if result.deleted_count > 0:
             await self.purge_media_from_catalogs(tmdb_id, collection_name)
+            _invalidate_public_catalog_cache()
             LOGGER.info(f"{media_type} with tmdb_id {tmdb_id} deleted successfully.")
             return True
         LOGGER.info(f"No document found with tmdb_id {tmdb_id}.")
@@ -2235,6 +2322,7 @@ class Database:
                 else:
                     movie['updated_on'] = datetime.utcnow()
                     await db["movie"].replace_one({"_id": movie["_id"]}, movie)
+                _invalidate_public_catalog_cache()
                 return True
 
             #----- Check TV Shows
@@ -2254,9 +2342,11 @@ class Database:
                                         if len(tv["seasons"]) == 0:
                                             await db["tv"].delete_one({"_id": tv["_id"]})
                                             await self.purge_media_from_catalogs(tv.get("tmdb_id"), "tv")
+                                            _invalidate_public_catalog_cache()
                                             return True
                                 tv['updated_on'] = datetime.utcnow()
                                 await db["tv"].replace_one({"_id": tv["_id"]}, tv)
+                                _invalidate_public_catalog_cache()
                                 return True
         return False
 

@@ -45,7 +45,7 @@ async def admin_dashboard_page(request: Request, _: bool = Depends(require_auth)
 #----- Login form (redirects to home when already authenticated)
 async def login_page(request: Request):
     if is_authenticated(request):
-        return RedirectResponse(url="/", status_code=302)
+        return RedirectResponse(url="/admin", status_code=302)
     return templates.TemplateResponse("login.html", _base_context(request))
 
 
@@ -54,7 +54,7 @@ async def login_post(request: Request, username: str = Form(...), password: str 
     if verify_credentials(username, password):
         request.session["authenticated"] = True
         request.session["username"] = username
-        return RedirectResponse(url="/", status_code=302)
+        return RedirectResponse(url="/admin", status_code=302)
     ctx = _base_context(request)
     ctx["error"] = "Invalid credentials"
     return templates.TemplateResponse("login.html", ctx)

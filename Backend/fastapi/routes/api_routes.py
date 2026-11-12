@@ -3,6 +3,7 @@ import asyncio
 import json
 import os
 import random
+import re
 import secrets
 import shutil
 from datetime import datetime
@@ -688,19 +689,62 @@ async def get_subscription_plans_api() -> dict:
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-async def add_subscription_plan_api(payload: dict) -> dict:
+def _normalize_plan_cap(value, field_name: str):
+    if value is None or str(value).strip() == "":
+        return None
+    raw = str(value).strip()
+    if raw.casefold() in {"unlimited", "no limit", "none"}:
+        return "Unlimited"
+    try:
+        amount = float(raw)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail=f"{field_name} must be a non-negative number of GB or Unlimited")
+    if amount < 0 or amount > 1_000_000:
+        raise HTTPException(status_code=400, detail=f"{field_name} must be between 0 and 1,000,000 GB")
+    return int(amount) if amount.is_integer() else amount
+
+
+def _plan_payload(payload: dict) -> dict:
+    name = str(payload.get("name") or "").strip()
+    if not name or len(name) > 80:
+        raise HTTPException(status_code=400, detail="Plan Name is required and must be 80 characters or fewer")
     try:
         days = int(payload.get("days", 0))
-        price = float(payload.get("price", 0.0))
-        currency = str(payload.get("currency") or "INR").upper().strip()
-        if days <= 0 or price < 0:
-            raise HTTPException(status_code=400, detail="Invalid plan parameters")
-            
-        plan_id = await db.add_subscription_plan(days, price, currency)
+        price = float(payload.get("price", -1))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Validity and Price must be valid numbers")
+    currency = str(payload.get("currency") or "INR").upper().strip()
+    if days <= 0 or days > 3650 or price < 0 or price > 1_000_000_000:
+        raise HTTPException(status_code=400, detail="Invalid plan validity or price")
+    if not re.fullmatch(r"[A-Z]{3}", currency):
+        raise HTTPException(status_code=400, detail="Currency must be a three-letter currency code")
+    daily_cap = _normalize_plan_cap(payload.get("daily_cap_gb"), "Daily Cap")
+    # Monthly data is unlimited for all plans in this release. The DB field
+    # remains present for a future entitlement update, but client input cannot
+    # accidentally advertise a finite cap.
+    return {
+        "name": name, "days": days, "price": price, "currency": currency,
+        "daily_cap_gb": daily_cap,
+        "monthly_cap": "Unlimited",
+    }
+
+
+async def _invalidate_public_plan_cache():
+    try:
+        from Backend.fastapi.routes.public_site import invalidate_public_cache
+        invalidate_public_cache()
+    except Exception:
+        pass
+
+
+async def add_subscription_plan_api(payload: dict) -> dict:
+    try:
+        values = _plan_payload(payload)
+        plan_id = await db.add_subscription_plan(**values)
         if plan_id:
+            await _invalidate_public_plan_cache()
             return {"status": "success", "message": "Plan added successfully", "plan_id": plan_id}
-        else:
-            raise HTTPException(status_code=500, detail="Failed to add plan")
+        raise HTTPException(status_code=500, detail="Failed to add plan")
     except HTTPException:
         raise
     except Exception as e:
@@ -708,26 +752,22 @@ async def add_subscription_plan_api(payload: dict) -> dict:
 
 async def update_subscription_plan_api(plan_id: str, payload: dict) -> dict:
     try:
-        days = int(payload.get("days", 0))
-        price = float(payload.get("price", 0.0))
-        currency = str(payload.get("currency") or "INR").upper().strip()
-        if days <= 0 or price < 0:
-             raise HTTPException(status_code=400, detail="Invalid plan parameters")
-             
-        success = await db.update_subscription_plan(plan_id, days, price, currency)
+        values = _plan_payload(payload)
+        success = await db.update_subscription_plan(plan_id, **values)
         if success:
-             return {"status": "success", "message": "Plan updated successfully"}
-        else:
-             raise HTTPException(status_code=404, detail="Plan not found or update failed")
+            await _invalidate_public_plan_cache()
+            return {"status": "success", "message": "Plan updated successfully"}
+        raise HTTPException(status_code=404, detail="Plan not found or update failed")
     except HTTPException:
-         raise
+        raise
     except Exception as e:
-         raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
 
 async def delete_subscription_plan_api(plan_id: str) -> dict:
     try:
         success = await db.delete_subscription_plan(plan_id)
         if success:
+            await _invalidate_public_plan_cache()
             return {"status": "success", "message": "Plan deleted successfully"}
         else:
             raise HTTPException(status_code=404, detail="Plan not found")
@@ -1952,12 +1992,29 @@ async def update_settings_api(payload: dict) -> dict:
                         detail=f"Channel {', '.join(sorted(clash))} can't be in both {a} and {b} channels — each channel may only belong to one field."
                     )
 
+    def _validate_public_telegram_target(value: str, field: str, allow_url: bool = True) -> str:
+        value = str(value or "").strip()
+        if not value:
+            return ""
+        username = value.removeprefix("@").strip()
+        if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{4,31}", username):
+            return username
+        if allow_url and re.fullmatch(r"https://(?:t\.me|telegram\.me)/[A-Za-z][A-Za-z0-9_]{4,31}/?", value, re.I):
+            return value.rstrip("/")
+        raise HTTPException(status_code=400, detail=f"Invalid {field}. Use a Telegram @username or https://t.me/username.")
+
+    if "public_bot_username" in payload:
+        payload["public_bot_username"] = _validate_public_telegram_target(payload["public_bot_username"], "purchase bot", allow_url=False)
+    if "public_support_contact" in payload:
+        payload["public_support_contact"] = _validate_public_telegram_target(payload["public_support_contact"], "support contact")
+
     #----- Strip whitespace from string fields
     for key in ("tmdb_api", "base_url", "upstream_repo", "upstream_branch",
                 "admin_username", "admin_password", "session_secret", "http_proxy_url",
                 "cf_stream_url", "cf_stream_secret", "cf_stream_mode",
                 "mediaflow_password", "payment_instructions", "payment_qr_url",
-                "announcement_channel", "skip_channel"):
+                "announcement_channel", "skip_channel", "public_bot_username",
+                "public_support_contact"):
         if key in payload and isinstance(payload[key], str):
             payload[key] = payload[key].strip()
 

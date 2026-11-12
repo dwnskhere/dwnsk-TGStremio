@@ -578,6 +578,12 @@ class ScanManager:
                         await storage["tv"].replace_one({"_id": tv["_id"]}, tv)
                     else:
                         await storage["tv"].delete_one({"_id": tv["_id"]})
+        if purged:
+            try:
+                from Backend.fastapi.routes.public_site import invalidate_public_cache
+                invalidate_public_cache()
+            except Exception:
+                pass
         return purged
 
 

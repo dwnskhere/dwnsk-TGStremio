@@ -1,0 +1,120 @@
+{% extends "public_base.html" %}
+{% block title %}Plans — CodecIndex{% endblock %}
+{% block content %}
+<section class="home-hero">
+  <p class="eyebrow" style="text-align:center">CODECINDEX · MANAGED TELEGRAM MEDIA HOSTING</p>
+  <div class="plans-intro">
+    <h1 class="page-title" style="font-size:clamp(39px,6vw,72px)">Your media.<br><em>Your library.</em></h1>
+    <p>CodecIndex is an unofficial managed hosting service for organizing and streaming Telegram media through its supported addon with Nuvio and Stremio. No personal server setup is required.</p>
+    <p class="hero-compat">Designed for compatible Nuvio and Stremio environments. Actual compatibility and available features can vary by player, platform and version.</p>
+  </div>
+  <div class="home-actions">
+    {% if purchase_url %}<a class="btn btn-gold" href="{{ purchase_url }}" target="_blank" rel="noopener noreferrer">Open activation bot ↗</a>{% endif %}
+    <a class="btn" href="/library">Browse public library</a>
+  </div>
+</section>
+
+<section class="section collection-glance" aria-labelledby="collection-title">
+  <div class="section-head"><h2 id="collection-title">Our collection at a glance</h2><span class="label">PUBLIC LIBRARY INDEX</span></div>
+  <div class="stats-grid stats-grid-clean">
+    <div class="stat"><div class="stat-label">Movies</div><div class="stat-num">{{ '{:,}'.format(library_stats.movies) }}</div><div class="stat-sub">Public titles in the library</div></div>
+    <div class="stat"><div class="stat-label">TV shows</div><div class="stat-num">{{ '{:,}'.format(library_stats.tv_shows) }}</div><div class="stat-sub">Public series indexed</div></div>
+    <div class="stat"><div class="stat-label">Episodes</div><div class="stat-num">{{ '{:,}'.format(library_stats.episodes) }}</div><div class="stat-sub">Across available seasons</div></div>
+  </div>
+  <p class="plan-note">These figures reflect publicly listed catalogue records and may change as the library is updated.</p>
+</section>
+
+<section class="section" id="plans">
+  <div class="section-head"><h2>Choose your plan</h2><span class="label">LIVE PLANS</span></div>
+  {% if plans %}<div class="plans-grid">
+    {% for plan in plans %}<article class="plan-card">
+      <div class="plan-name">{{ plan.name }}</div><div class="plan-days">{{ plan.days }} days of access</div>
+      <div class="plan-price">{% if plan.currency == 'INR' %}₹{% elif plan.currency == 'USD' %}${% elif plan.currency == 'EUR' %}€{% elif plan.currency == 'GBP' %}£{% elif plan.currency == 'AED' %}د.إ{% else %}{{ plan.currency }} {% endif %}{{ '%.2f'|format(plan.price) if plan.price % 1 else '%.0f'|format(plan.price) }}</div>
+      <div class="plan-currency">{{ plan.currency }} · VALID FOR {{ plan.days }} DAYS</div>
+      <ul class="plan-points">
+        <li>Daily usage: {% if plan.daily_cap_gb == 'Unlimited' %}Unlimited{% elif plan.daily_cap_gb is not none %}{{ plan.daily_cap_gb }} GB{% else %}As configured{% endif %}</li>
+        <li>Monthly usage: Unlimited (current offering)</li>
+        <li>Managed media library access</li>
+        <li>Use with compatible Nuvio / Stremio setups</li>
+      </ul>
+      {% if purchase_url %}<a class="btn btn-gold" href="{{ purchase_url }}" target="_blank" rel="noopener noreferrer">Open bot to subscribe ↗</a>{% else %}<span class="btn" style="opacity:.6;text-align:center">Activation bot not configured</span>{% endif %}
+    </article>{% endfor %}
+  </div>
+  {% else %}<div class="empty-state">Subscription plans are not available right now. Please check back later.</div>{% endif %}
+  <p class="plan-note">Plan names, validity, pricing and daily limits are loaded from the subscription database. Monthly usage is currently unlimited for the plans offered. Confirm the current plan details with the activation bot before purchasing.</p>
+</section>
+
+<section class="section home-features">
+  <div class="section-head"><h2>What CodecIndex offers</h2><span class="label">SERVICE OVERVIEW</span></div>
+  <div class="feature-grid">
+    <article class="feature-card"><span>01</span><h3>Direct streaming</h3><p>Access supported Telegram media through a compatible player without waiting for a full-file download.</p></article>
+    <article class="feature-card"><span>02</span><h3>Organized catalogue</h3><p>Browse movies, TV shows, seasons and episodes with posters and descriptive metadata.</p></article>
+    <article class="feature-card"><span>03</span><h3>Nuvio &amp; Stremio</h3><p>Designed for supported Nuvio and Stremio environments. Player and platform compatibility may vary.</p></article>
+    <article class="feature-card"><span>04</span><h3>Managed hosting</h3><p>Hosting is managed for you; a personal VPS, Docker installation or server administration is not required.</p></article>
+    <article class="feature-card"><span>05</span><h3>Search and discovery</h3><p>Find available titles through the supported addon and explore an organized media catalogue.</p></article>
+    <article class="feature-card"><span>06</span><h3>Playback options</h3><p>Audio, subtitles and playback resume depend on the source, player and the features they support.</p></article>
+    <article class="feature-card"><span>07</span><h3>Private access</h3><p>Subscription access is associated with an individual token. Keep your access details private.</p></article>
+    <article class="feature-card"><span>08</span><h3>Usage visibility</h3><p>Plan-specific daily usage limits apply. Check the selected plan and activation bot for current details.</p></article>
+  </div>
+</section>
+
+<section class="section">
+  <div class="section-head"><h2>How CodecIndex works</h2><span class="label">GETTING STARTED</span></div>
+  <div class="steps-grid">
+    <article><b>01</b><h3>Open the activation bot</h3><p>Use the bot link and review the available subscription plans and instructions.</p></article>
+    <article><b>02</b><h3>Follow the purchase steps</h3><p>Complete the payment process described by the bot. Provide the transaction reference or payment proof if requested.</p></article>
+    <article><b>03</b><h3>Receive your access details</h3><p>After payment review, follow the bot's instructions for your token and addon configuration.</p></article>
+    <article><b>04</b><h3>Set up your player</h3><p>Open a compatible Nuvio or Stremio environment and follow the provided addon setup instructions.</p></article>
+  </div>
+</section>
+
+<section class="section usage-section">
+  <div class="section-head"><h2>Plans, usage &amp; access</h2><span class="label">PLEASE REVIEW BEFORE ACTIVATION</span></div>
+  <div class="info-grid">
+    <article class="info-card"><h3>Daily usage</h3><p>Each plan may have a daily usage cap. The applicable value is shown on the plan card and managed through the subscription configuration. Access behaviour after reaching a cap depends on the active service settings.</p></article>
+    <article class="info-card"><h3>Monthly usage</h3><p>Monthly usage is currently listed as unlimited for the plans offered. This is the current plan presentation and may be revised in a future update.</p></article>
+    <article class="info-card"><h3>Token use</h3><p>One access token is intended for one user. Keep it private and do not share, transfer or resell access.</p></article>
+    <article class="info-card"><h3>Activation</h3><p>Subscription validity and access activation are handled through the Telegram bot and the service's verification process. Follow the current instructions shown there.</p></article>
+  </div>
+</section>
+
+<section class="section payment-section">
+  <div class="section-head"><h2>Payment &amp; activation information</h2><span class="label">USE THE OFFICIAL BOT</span></div>
+  <div class="policy-note">
+    <p>Start the purchase process through the configured activation bot. Follow the payment instructions displayed by the bot. Where payment proof is requested, ensure the transaction reference is visible and the submitted details are clear. Payment review and activation depend on verification; timing may vary.</p>
+    {% if purchase_url %}<a class="btn btn-gold" href="{{ purchase_url }}" target="_blank" rel="noopener noreferrer">Open activation bot ↗</a>{% endif %}
+  </div>
+</section>
+
+<section class="section faq-section">
+  <div class="section-head"><h2>Questions, answered</h2><span class="label">HELP &amp; INFORMATION</span></div>
+  <div class="faq-list">{% for question, answer in faqs %}<details class="faq-item"><summary>{{ question }}<span>＋</span></summary><p>{{ answer }}</p></details>{% endfor %}</div>
+</section>
+
+<section class="section policy-grid-section">
+  <div class="section-head"><h2>Fair use &amp; service information</h2><span class="label">IMPORTANT NOTES</span></div>
+  <div class="info-grid">
+    <article class="info-card"><h3>Fair and private use</h3><p>Access is intended for individual use. Token sharing, reselling, attempts to bypass usage controls and misuse of the service are not permitted. Please review the applicable terms before activation.</p></article>
+    <article class="info-card"><h3>Refund requests</h3><p>Refund requests can be raised through the configured support contact and may be reviewed against the applicable policy and account usage. Eligibility and outcomes depend on review; a refund is not guaranteed.</p></article>
+    <article class="info-card"><h3>Service availability</h3><p>CodecIndex uses third-party infrastructure. Maintenance, external provider issues or network conditions may affect availability. No fixed restoration time or compensation outcome is promised here.</p></article>
+    <article class="info-card"><h3>Third-party services</h3><p>CodecIndex is an unofficial managed hosting service. Nuvio, Stremio and Telegram are separate services; CodecIndex is not affiliated with or endorsed by their respective operators or addon developers.</p></article>
+  </div>
+  <div class="support-bar">
+    <div><strong>Need assistance?</strong><div class="muted" style="font-size:11px;margin-top:4px">Use the support contact configured by the service administrator.</div></div>
+    {% if support_url %}<a class="btn" href="{{ support_url }}" target="_blank" rel="noopener noreferrer">Contact support ↗</a>{% else %}<span class="muted" style="font-size:11px">Support contact is not configured.</span>{% endif %}
+  </div>
+</section>
+
+<section class="section footer-links">
+  <div class="section-head"><h2>Useful links</h2><span class="label">CODECINDEX</span></div>
+  <div class="link-grid">
+    <a href="https://t.me/CodecIndex" target="_blank" rel="noopener noreferrer">Official Telegram channel ↗</a>
+    <a href="{{ terms_url }}" target="_blank" rel="noopener noreferrer">Terms &amp; Conditions ↗</a>
+    <a href="{{ usage_policy_url }}" target="_blank" rel="noopener noreferrer">Usage Policy ↗</a>
+    {% if purchase_url %}<a href="{{ purchase_url }}" target="_blank" rel="noopener noreferrer">Activation bot ↗</a>{% endif %}
+    {% if support_url %}<a href="{{ support_url }}" target="_blank" rel="noopener noreferrer">Support contact ↗</a>{% endif %}
+    <a href="/library">Browse public library ↗</a>
+  </div>
+  <p class="plan-note">CodecIndex is an unofficial managed hosting service. Nuvio is a separate media player, and Stremio is a separate platform. Availability and compatibility depend on the relevant third-party applications, versions, sources and infrastructure.</p>
+</section>
+{% endblock %}
